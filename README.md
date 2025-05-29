@@ -4,7 +4,7 @@
 
 ## Example Usage
 
-Assumes you have an OpenAI key and GitHub PAT stored in the environment variables `OPENAI_API` and `GITHUB_TOKEK`, respectively. Modify `main_test_flow()` in `main/py` to point to a relevant issue and file. Then, within the main directory, run: 
+Assumes you have an OpenAI key and GitHub PAT stored in the environment variables `OPENAI_API_KEY` and `GITHUB_TOKEN`, respectively. Modify `main_test_flow()` in `main/py` to point to a relevant issue and file. Then, within the main directory, run: 
 ```bash
 python -m main
 ```
