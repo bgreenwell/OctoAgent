@@ -776,7 +776,7 @@ async def main_test_flow():
     target_file_for_fix = "R/explain.R" 
     
     if not os.environ.get("GITHUB_TOKEN"): print("🚨 WARNING: GITHUB_TOKEN not set.")
-    if not (os.environ.get("PROXY_API_KEY") and os.environ.get("PROXY_API_URL")) and not os.environ.get("OPENAI_API_KEY"):
+    if not os.environ.get("OPENAI_API_KEY"):
         print("🚨 WARNING: OpenAI API key not set.")
     
     print(f"--- Starting GitHub Issue Solver Test Flow ---\nTargeting issue: {test_issue_url}")
