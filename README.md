@@ -93,9 +93,9 @@ To target a repository under a different user or organization, use the `--user_i
 
 ## TODO
 
-- [ ] Add NumPy style docstrings 
+- [x] Add NumPy style docstrings 
 - [ ] Add options to specify different provider and model 
 - [ ] Add more agentic features (e.g., handoffs)
-- [ ] Improve logic to automatically determine target files
+- [x] Improve logic to automatically determine target file
 - [ ] Add robust error handling and retries for API calls
 - [ ] Create a more sophisticated review and revision loop
