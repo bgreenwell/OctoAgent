@@ -19,7 +19,7 @@ The project is organized into a Python package within the `src` directory for be
 ├── .gitignore
 ├── src/
 │   └── octoagent/
-│       ├── __init__.py         # Makes 'octoragent' a Python package
+│       ├── __init__.py         # Makes 'octoagent' a Python package
 │       ├── agents.py           # All agent class definitions
 │       ├── github_client.py    # Handles all GitHub API interactions
 │       ├── tools.py            # Agent tools and utility functions
@@ -76,19 +76,19 @@ python -m src.octoagent.main <repo_name> <issue_number> [--user_id <user_id>] [-
 1.  **Run in autonomous mode:**
     This command attempts to solve issue #12 in the `bgreenwell/statlingua` repository, letting the agent identify the correct file to fix.
     ```bash
-    python -m src.octoragent.main statlingua 12
+    python -m src.octoagent.main statlingua 12
     ```
 
 2.  **Run on another user's repository:**
 To target a repository under a different user or organization, use the `--user_id` flag. Note that the `GITHUB_TOKEN` you have set must have access permissions for this repository.
     ```bash
-    python -m src.octoragent.main some-awesome-repo 42 --user_id another-developer
+    python -m src.octoagent.main some-awesome-repo 42 --user_id another-developer
     ```
     
 3.  **Run with a specific target file to override the agent:**
     If you already know which file needs to be fixed, you can specify it directly to skip the file identification step.
     ```bash
-    python -m src.octoragent.main ramify 15 --target_file ".gitignore"
+    python -m src.octoagent.main ramify 15 --target_file ".gitignore"
     ```
 
 ## TODO
