@@ -1,3 +1,10 @@
+"""
+A client for interacting with the GitHub REST API.
+
+This module provides the GitHubClient class, which encapsulates the logic for
+making authenticated requests to the GitHub API to perform actions like
+fetching issue details, creating branches, and committing files.
+"""
 import asyncio
 import base64
 import json
@@ -6,6 +13,26 @@ import requests
 from typing import Any, Dict, Optional
 
 class GitHubClient:
+    """
+    A client to handle interactions with the GitHub REST API.
+
+    Parameters
+    ----------
+    token : str, optional
+        The GitHub Personal Access Token. If not provided, it will be read
+        from the `GITHUB_TOKEN` environment variable.
+    base_url : str, optional
+        The base URL for the GitHub API, by default "https://api.github.com".
+
+    Attributes
+    ----------
+    base_url : str
+        The base URL for the GitHub API.
+    token : str or None
+        The GitHub token used for authentication.
+    headers : dict
+        The headers to include in all API requests.
+    """
     def __init__(self, token: Optional[str] = None, base_url: str = "https://api.github.com"):
         self.base_url = base_url
         self.token = token or os.environ.get("GITHUB_TOKEN")
@@ -19,6 +46,24 @@ class GitHubClient:
             print("Warning: GitHubClient initialized without a GITHUB_TOKEN. Authenticated operations will fail.")
 
     def _make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
+        """
+        A private helper method to make a request to the GitHub API.
+
+        Parameters
+        ----------
+        method : str
+            The HTTP method to use (e.g., 'GET', 'POST', 'PUT').
+        endpoint : str
+            The API endpoint to target (e.g., '/repos/owner/repo').
+        **kwargs : dict
+            Additional keyword arguments to pass to `requests.request`.
+
+        Returns
+        -------
+        requests.Response
+            The response object from the API request. Returns a mock response
+            in case of a network error.
+        """
         url = f"{self.base_url}{endpoint}"
         try:
             response = requests.request(method, url, headers=self.headers, **kwargs)
@@ -37,6 +82,18 @@ class GitHubClient:
     async def get_default_branch(self, owner: str, repo: str) -> Optional[str]:
         """
         Gets the default branch name for a repository.
+
+        Parameters
+        ----------
+        owner : str
+            The owner of the repository.
+        repo : str
+            The name of the repository.
+
+        Returns
+        -------
+        str or None
+            The name of the default branch, or None if an error occurs.
         """
         endpoint = f"/repos/{owner}/{repo}"
         try:
@@ -51,6 +108,20 @@ class GitHubClient:
     async def list_files_in_repo(self, owner: str, repo: str, branch: str = "main") -> Dict[str, Any]:
         """
         Lists all files in a repository recursively for a given branch.
+
+        Parameters
+        ----------
+        owner : str
+            The owner of the repository.
+        repo : str
+            The name of the repository.
+        branch : str
+            The name of the branch to list files from.
+
+        Returns
+        -------
+        dict
+            A dictionary containing a list of file paths, or an error payload.
         """
         latest_sha = await self.get_latest_commit_sha(owner, repo, branch)
         if not latest_sha:
@@ -71,6 +142,23 @@ class GitHubClient:
             return {"error": f"Failed to list files for {owner}/{repo} on branch {branch}: {str(e)}"}
 
     async def get_issue_details(self, owner: str, repo: str, issue_number: int) -> Dict[str, Any]:
+        """
+        Retrieves the details for a specific GitHub issue.
+
+        Parameters
+        ----------
+        owner : str
+            The owner of the repository.
+        repo : str
+            The name of the repository.
+        issue_number : int
+            The number of the issue to retrieve.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the issue details, or an error payload.
+        """
         endpoint = f"/repos/{owner}/{repo}/issues/{issue_number}"
         try:
             loop = asyncio.get_running_loop()
@@ -86,6 +174,23 @@ class GitHubClient:
             return {"error": f"Failed to get issue details for {owner}/{repo}#{issue_number}: {str(e)}"}
 
     async def get_latest_commit_sha(self, owner: str, repo: str, branch: str = "main") -> Optional[str]:
+        """
+        Gets the SHA of the latest commit on a specific branch.
+
+        Parameters
+        ----------
+        owner : str
+            The owner of the repository.
+        repo : str
+            The name of the repository.
+        branch : str
+            The name of the branch.
+
+        Returns
+        -------
+        str or None
+            The SHA of the latest commit, or None if an error occurs.
+        """
         endpoint = f"/repos/{owner}/{repo}/branches/{branch}"
         try:
             loop = asyncio.get_running_loop()
@@ -97,6 +202,27 @@ class GitHubClient:
             return None
 
     async def create_branch(self, owner: str, repo: str, new_branch_name: str, base_branch_name: str = "main") -> Dict[str, Any]:
+        """
+        Creates a new branch in a repository from a base branch.
+
+        If the branch already exists, it returns a message indicating so.
+
+        Parameters
+        ----------
+        owner : str
+            The owner of the repository.
+        repo : str
+            The name of the repository.
+        new_branch_name : str
+            The name of the new branch to create.
+        base_branch_name : str
+            The name of the branch from which to create the new one.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the API response or an error payload.
+        """
         if not self.token:
             return {"error": "GitHub token is required to create a branch."}
 
@@ -142,6 +268,26 @@ class GitHubClient:
                  return {"error": f"An unexpected error occurred after branch creation attempt: {str(e_generic)}"}
 
     async def add_comment_to_issue(self, owner: str, repo: str, issue_number: int, comment_body: str) -> Dict[str, Any]:
+        """
+        Adds a comment to a GitHub issue.
+
+        Parameters
+        ----------
+        owner : str
+            The owner of the repository.
+        repo : str
+            The name of the repository.
+        issue_number : int
+            The number of the issue to comment on.
+        comment_body : str
+            The content of the comment in markdown format.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the API response for the new comment, or
+            an error payload.
+        """
         if not self.token:
             return {"error": "GitHub token is required to post a comment."}
         endpoint = f"/repos/{owner}/{repo}/issues/{issue_number}/comments"
@@ -160,6 +306,25 @@ class GitHubClient:
             return {"error": f"Failed to post comment: {str(e)}"}
 
     async def get_file_sha(self, owner: str, repo: str, file_path: str, branch_name: str) -> Optional[str]:
+        """
+        Gets the SHA of an existing file on a branch.
+
+        Parameters
+        ----------
+        owner : str
+            The owner of the repository.
+        repo : str
+            The name of the repository.
+        file_path : str
+            The path to the file within the repository.
+        branch_name : str
+            The name of the branch where the file exists.
+
+        Returns
+        -------
+        str or None
+            The SHA of the file if it exists, otherwise None.
+        """
         """Gets the SHA of an existing file on a branch, returns None if not found."""
         endpoint = f"/repos/{owner}/{repo}/contents/{file_path}?ref={branch_name}"
         try:
@@ -178,7 +343,29 @@ class GitHubClient:
     async def create_commit_on_branch(self, owner: str, repo: str, branch_name: str, commit_message: str, file_path: str, file_content: str) -> Dict[str, Any]:
         """
         Creates or updates a file in a branch and commits it.
-        Uses GitHub API: PUT /repos/{owner}/{repo}/contents/{path}
+
+        This method uses the GitHub API endpoint:
+        PUT /repos/{owner}/{repo}/contents/{path}
+
+        Parameters
+        ----------
+        owner : str
+            The owner of the repository.
+        repo : str
+            The name of the repository.
+        branch_name : str
+            The name of the branch to commit to.
+        commit_message : str
+            The commit message.
+        file_path : str
+            The path of the file to create or update.
+        file_content : str
+            The new content of the file.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the commit details, or an error payload.
         """
         if not self.token:
             return {"error": "GitHub token is required to commit files."}

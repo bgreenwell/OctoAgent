@@ -1,3 +1,10 @@
+"""
+Defines the agent classes used in the OctoAgent workflow.
+
+Each agent is a specialized class inheriting from a reusable base agent,
+with specific instructions and tools tailored to its role (e.g., triaging
+issues, proposing code, reviewing code).
+"""
 from agents import Agent as BaseAgent, Runner
 from .tools import download_github_issue, create_pr_branch, commit_code_to_branch, post_comment_to_github, list_repository_files
 
@@ -100,6 +107,16 @@ class FileIdentifierAgent(ReusableAgent):
 class SpecialistAgent(ReusableAgent):
     """
     An example of a specialized agent that inherits from ReusableAgent.
+
+    Parameters
+    ----------
+    name : str, optional
+        The name of the agent. Defaults to "Specialist".
+    expertise : str, optional
+        The area of expertise for this agent, added to its instructions.
+        Defaults to "general tasks".
+    **kwargs : dict
+        Additional keyword arguments passed to the ReusableAgent.
     """
     def __init__(self, name: str = "Specialist", expertise: str = "general tasks", **kwargs):
         """
@@ -139,6 +156,17 @@ class CodeProposerAgent(ReusableAgent):
         )
 
 class CodeReviewerAgent(ReusableAgent):
+    """
+    An agent that reviews proposed code solutions.
+
+    Parameters
+    ----------
+    review_aspect : str, optional
+        The specific aspect of the code to focus on (e.g., "code style").
+        Defaults to "general code quality".
+    **kwargs : dict
+        Additional keyword arguments passed to the ReusableAgent.
+    """
     def __init__(self, review_aspect: str = "general code quality", **kwargs):
         super().__init__(
             name=f"{review_aspect.replace(' ', '')}Reviewer",

@@ -1,9 +1,16 @@
+"""
+The main entry point and orchestration logic for the OctoAgent application.
+
+This script parses command-line arguments and orchestrates the flow of agents
+to triage a GitHub issue, identify a target file, propose a solution,
+review the code, and finally commit the fix and post a summary.
+"""
 import argparse
 import asyncio
 import os
 import sys
-from typing import Any, Dict, List, Optional
 
+from typing import Any, Dict, List, Optional
 from agents import Runner, ToolCallItem, ToolCallOutputItem
 from .agents import (
     BranchCreatorAgent,
@@ -24,6 +31,30 @@ async def solve_github_issue_flow(
     repo_name_override: Optional[str] = None,
     target_file_override: Optional[str] = None,
 ):
+    """
+    Orchestrates the end-to-end flow of agents to solve a GitHub issue.
+
+    This function coordinates a sequence of agents to perform the following steps:
+    1.  Triage the issue to understand its details.
+    2.  Identify the target file to be fixed (or use a user-provided override).
+    3.  Propose a code solution.
+    4.  Review the proposed code for technical correctness and style.
+    5.  Create a new branch for the fix.
+    6.  Commit the finalized code to the new branch.
+    7.  Post a summary comment on the original GitHub issue.
+
+    Parameters
+    ----------
+    issue_url : str
+        The full URL of the GitHub issue to be solved.
+    repo_owner_override : str, optional
+        The GitHub repository owner. If not provided, it's parsed from the URL.
+    repo_name_override : str, optional
+        The GitHub repository name. If not provided, it's parsed from the URL.
+    target_file_override : str, optional
+        If provided, this file path will be used directly, skipping the
+        FileIdentifierAgent step. Defaults to None.
+    """
     print(f"\n🚀 Starting GitHub Issue Solver for: {issue_url}\n" + "=" * 50)
 
     repo_owner = repo_owner_override
@@ -526,6 +557,9 @@ async def solve_github_issue_flow(
 
 
 def main():
+    """
+    Parses command-line arguments and initiates the issue-solving workflow.
+    """
     parser = argparse.ArgumentParser(
         description="Solve a GitHub issue using OctoAgent."
     )
