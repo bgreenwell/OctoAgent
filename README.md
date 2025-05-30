@@ -93,6 +93,7 @@ To target a repository under a different user or organization, use the `--user_i
 
 ## TODO
 
+- [ ] Add NumPy style docstrings 
 - [ ] Add options to specify different provider and model 
 - [ ] Add more agentic features (e.g., handoffs)
 - [ ] Improve logic to automatically determine target files
