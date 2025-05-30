@@ -4,7 +4,7 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 
-My personal playground for exploring agentic AI concepts by attempting to tackle GitHub issues. This project uses a team of AI agents, powered by the OpenAI Python SDK, to triage, propose, review, and commit solutions for GitHub issues.
+My personal playground for exploring agentic AI concepts by attempting to tackle GitHub issues. This project uses a team of AI agents, powered by the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python), to triage, propose, review, and commit solutions for GitHub issues.
 
 **Disclaimer:** This is strictly for learning and experimentation, not for serious bug squashing... yet!
 
