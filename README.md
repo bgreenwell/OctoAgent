@@ -1,4 +1,4 @@
-# OctoAgent 🐙🕵️
+# OctoAgent 🐙🕵️ <img src="assets/logo.png" align="right" height="120" alt="octoagent logo" />
 
 [![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat-square)](https://github.com/bgreenwell/octoagent/issues)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
@@ -14,9 +14,11 @@ The project is organized into a Python package within the `src` directory for be
 
 ```
 .
+├── .gitignore
 ├── LICENSE
 ├── requirements.txt
-├── .gitignore
+├── assets/
+│   └── logo.png  <-- Your new logo file
 ├── src/
 │   └── octoagent/
 │       ├── __init__.py         # Makes 'octoagent' a Python package
