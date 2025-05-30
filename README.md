@@ -84,7 +84,7 @@ python -m src.octoagent.main <repo_name> <issue_number> [--user_id <user_id>] [-
     ```
 
 2.  **Run on another user's repository:**
-    To target a repository under a different user or organization, use the `--user_id` flag.
+To target a repository under a different user or organization, use the `--user_id` flag. Note that the `GITHUB_TOKEN` you have set must have access permissions for this repository.
     ```bash
     python -m src.octoragent.main some-awesome-repo 42 --user_id another-developer
     ```
