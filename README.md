@@ -38,7 +38,7 @@ The project is organized into a Python package within the `src` directory for be
 First, clone the repository and install the necessary Python dependencies. (It is recommended to do this in a virtual environment).
 
 ```bash
-git clone [https://github.com/bgreenwell/octoagent.git](https://github.com/bgreenwell/octoagent.git)
+git clone https://github.com/bgreenwell/octoagent.git
 cd octoagent
 pip install -r requirements.txt
 ```
