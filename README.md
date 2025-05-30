@@ -14,19 +14,19 @@ The project is organized into a Python package within the `src` directory for be
 
 ```
 .
-├── .gitignore
-├── LICENSE
-├── requirements.txt
 ├── assets/
 │   └── logo.png  <-- Your new logo file
-├── src/
+└── src/
 │   └── octoagent/
 │       ├── __init__.py         # Makes 'octoagent' a Python package
 │       ├── agents.py           # All agent class definitions
 │       ├── github_client.py    # Handles all GitHub API interactions
 │       ├── tools.py            # Agent tools and utility functions
 │       └── main.py             # Main execution flow and CLI arguments
-└── README.md
+├── .gitignore
+├── LICENSE
+├── README.md
+└── requirements.txt
 ```
 
 * `agents.py`: Defines the different AI agents, such as `IssueTriagerAgent`, `CodeProposerAgent`, `CodeReviewerAgent`, and `CodeCommitterAgent`.
