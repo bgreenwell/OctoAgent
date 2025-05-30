@@ -1,7 +1,3 @@
-Excellent point. The documentation should always keep pace with new features. Here is the updated `README.md` with the explanation of the optional `--target_file` argument.
-
-### Updated `README.md`
-```markdown
 # OctoAgent 🐙🕵️
 
 [![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat-square)](https://github.com/bgreenwell/octoagent/issues)
