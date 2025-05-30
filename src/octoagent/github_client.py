@@ -34,6 +34,42 @@ class GitHubClient:
                 mock_response._content = b'{"error": "Network request to GitHub failed."}' # type: ignore
             return mock_response
 
+    async def get_default_branch(self, owner: str, repo: str) -> Optional[str]:
+        """
+        Gets the default branch name for a repository.
+        """
+        endpoint = f"/repos/{owner}/{repo}"
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda: self._make_request("GET", endpoint))
+            response.raise_for_status()
+            return response.json().get("default_branch")
+        except Exception as e:
+            print(f"Error getting default branch for {owner}/{repo}: {e}")
+            return None
+
+    async def list_files_in_repo(self, owner: str, repo: str, branch: str = "main") -> Dict[str, Any]:
+        """
+        Lists all files in a repository recursively for a given branch.
+        """
+        latest_sha = await self.get_latest_commit_sha(owner, repo, branch)
+        if not latest_sha:
+            return {"error": f"Could not get latest commit SHA for branch '{branch}'."}
+
+        endpoint = f"/repos/{owner}/{repo}/git/trees/{latest_sha}?recursive=true"
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda: self._make_request("GET", endpoint))
+            response.raise_for_status()
+            response_json = response.json()
+            # Extract file paths from the tree
+            files = [item['path'] for item in response_json.get('tree', []) if item.get('type') == 'blob']
+            return {"files": files}
+        except requests.exceptions.HTTPError as e:
+            return {"error": f"HTTPError: {e.response.status_code} {e.response.reason}", "details_text": e.response.text}
+        except Exception as e:
+            return {"error": f"Failed to list files for {owner}/{repo} on branch {branch}: {str(e)}"}
+
     async def get_issue_details(self, owner: str, repo: str, issue_number: int) -> Dict[str, Any]:
         endpoint = f"/repos/{owner}/{repo}/issues/{issue_number}"
         try:

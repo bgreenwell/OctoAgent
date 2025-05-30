@@ -1,5 +1,6 @@
 from agents import Agent as BaseAgent, Runner
-from .tools import download_github_issue, create_pr_branch, commit_code_to_branch, post_comment_to_github
+from .tools import download_github_issue, create_pr_branch, commit_code_to_branch, post_comment_to_github, list_repository_files
+
 
 class ReusableAgent(BaseAgent):
     """
@@ -79,6 +80,22 @@ class ReusableAgent(BaseAgent):
         """
         result = self.runner.run_sync(self, input=user_input, **kwargs)
         return result.final_output
+
+class FileIdentifierAgent(ReusableAgent):
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="FileIdentifierAgent",
+            instructions=(
+                "You are an expert software architect. Your task is to identify which single file in a repository "
+                "most likely needs to be modified to address a given GitHub issue. "
+                "You will be provided with the issue details (title, body, labels). "
+                "Use the `list_repository_files` tool to see the repository's file structure. "
+                "Based on the issue description and the list of files, determine the single most relevant file path. "
+                "Output ONLY the full file path as a string, and nothing else."
+            ),
+            tools=[list_repository_files],
+            **kwargs
+        )
 
 class SpecialistAgent(ReusableAgent):
     """

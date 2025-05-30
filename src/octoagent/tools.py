@@ -13,6 +13,15 @@ def parse_github_issue_url(issue_url: str) -> Optional[Tuple[str, str, int]]:
 github_client = GitHubClient()
 
 @function_tool
+async def list_repository_files(repo_owner: str, repo_name: str, branch: str = "main") -> Dict[str, Any]:
+    """
+    Lists all file paths in a given repository and branch.
+    Useful for understanding the repository structure before identifying a file to modify.
+    """
+    print(f"Tool (tools.py): Listing files for {repo_owner}/{repo_name} on branch {branch}...")
+    return await github_client.list_files_in_repo(repo_owner, repo_name, branch)
+
+@function_tool
 async def download_github_issue(issue_url: str) -> Dict[str, Any]:
     parsed_url = parse_github_issue_url(issue_url)
     if not parsed_url: return {"error": "Invalid GitHub issue URL format."}

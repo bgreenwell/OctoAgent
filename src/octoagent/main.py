@@ -12,13 +12,14 @@ from .agents import (
     CodeReviewerAgent,
     CommentPosterAgent,
     IssueTriagerAgent,
+    FileIdentifierAgent,
 )
+from .github_client import GitHubClient
 from .tools import extract_code_from_markdown, parse_github_issue_url
 
 
 async def solve_github_issue_flow(
     issue_url: str,
-    target_file_path: str,
     repo_owner_override: Optional[str] = None,
     repo_name_override: Optional[str] = None,
 ):
@@ -38,9 +39,19 @@ async def solve_github_issue_flow(
             )
             return
     print(f"Target Repository: {repo_owner}/{repo_name}")
-    print(f"Target File Path for fix: {target_file_path}")
+
+    # --- NEW: Get the default branch for the repository ---
+    github_client = GitHubClient()
+    print("📋 Fetching default branch name...")
+    default_branch_name = await github_client.get_default_branch(repo_owner, repo_name)
+    if not default_branch_name:
+        print(f"❌ Error: Could not determine the default branch for {repo_owner}/{repo_name}.")
+        return
+    print(f"Default branch is '{default_branch_name}'.\n")
+
 
     triager = IssueTriagerAgent()
+    file_identifier = FileIdentifierAgent()
     code_proposer = CodeProposerAgent()
     technical_reviewer = CodeReviewerAgent(
         review_aspect="technical correctness and efficiency"
@@ -146,6 +157,25 @@ async def solve_github_issue_flow(
         print("❌ Error: Issue number not found in triaged details.")
         return
     print(f"Successfully processed issue #{issue_number}: '{issue_title}'")
+
+    # --- Step 1.5: Identifying Target File ---
+    print(f"\n📑 Step 1.5: Identifying Target File for issue #{issue_number}...")
+    identifier_input = (
+        f"Based on the following GitHub issue, identify the single file that needs to be modified.\n"
+        f"Repository: {repo_owner}/{repo_name}\n"
+        f"Default Branch: {default_branch_name}\n"
+        f"Issue Title: {issue_title}\n"
+        f"Issue Body:\n{issue_body}\n\n"
+        f"Labels: {', '.join(issue_labels)}\n"
+    )
+    identifier_run = await runner.run(file_identifier, input=identifier_input)
+    target_file_path = identifier_run.final_output.strip()
+
+    if not target_file_path or "/" not in target_file_path:
+        print(f"❌ Error: FileIdentifierAgent did not return a valid file path. Output was: '{target_file_path}'")
+        return
+    print(f"File Identifier Agent identified target file: {target_file_path}\n")
+
 
     # --- Step 2: Propose Initial Code Solution ---
     print(f"\n💡 Step 2: Proposing Initial Code Solution for issue #{issue_number}...")
@@ -274,7 +304,7 @@ async def solve_github_issue_flow(
 
     branch_run = await runner.run(
         branch_creator,
-        input=f"Ensure branch for {repo_owner}/{repo_name} issue {issue_number}, prefix {branch_prefix}, base main.",
+        input=f"Ensure branch for {repo_owner}/{repo_name} issue {issue_number}, prefix {branch_prefix}, base {default_branch_name}.",
     )
     branch_agent_summary = branch_run.final_output
     print(f"Branch Creator Agent Output: {branch_agent_summary}\n")
@@ -429,6 +459,9 @@ async def solve_github_issue_flow(
         f"Automated processing for issue #{issue_number} ('{issue_title}'):"
     ]
     summary_comment_parts.append(f"\n**Triage Summary:**\n{triage_output_summary}")
+
+    summary_comment_parts.append(f"\n**File Identification:**\nAn agent identified `{target_file_path}` as the target file for the fix.")
+
     if proposed_solution_markdown:
         summary_comment_parts.append(
             f"\n**Initial Code Proposal Attempt:**\n{proposed_solution_markdown}"
@@ -488,12 +521,9 @@ def main():
         description="Solve a GitHub issue using OctoAgent."
     )
     parser.add_argument(
-        "repo_name", help="The name of the repository (e.g., 'octoagent')."
+        "repo_name", help="The name of the repository (e.g., 'octoragent')."
     )
     parser.add_argument("issue_number", type=int, help="The issue number.")
-    parser.add_argument(
-        "target_file", help="The target file path for the proposed fix."
-    )
     parser.add_argument(
         "--user_id",
         default="bgreenwell",
@@ -502,7 +532,7 @@ def main():
     args = parser.parse_args()
 
     issue_url = (
-        f"[https://github.com/](https://github.com/){args.user_id}/{args.repo_name}/issues/{args.issue_number}"
+        f"https://github.com/{args.user_id}/{args.repo_name}/issues/{args.issue_number}"
     )
 
     if not os.environ.get("GITHUB_TOKEN"):
@@ -516,7 +546,6 @@ def main():
             issue_url=issue_url,
             repo_owner_override=args.user_id,
             repo_name_override=args.repo_name,
-            target_file_path=args.target_file,
         )
     )
 
