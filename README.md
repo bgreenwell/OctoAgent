@@ -15,7 +15,7 @@ The project is organized into a Python package within the `src` directory for be
 ```
 .
 ├── assets/
-│   └── logo.png  <-- Your new logo file
+│   └── logo.png 
 └── src/
 │   └── octoagent/
 │       ├── __init__.py         # Makes 'octoagent' a Python package
