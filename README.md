@@ -97,8 +97,8 @@ python -m src.octoagent.main <repo_name> <issue_number> [--user_id <user_id>] [-
 
 ## TODO
 
+- [ ] Add options to specify different provider and model 
 - [ ] Add more agentic features (e.g., handoffs)
 - [ ] Improve logic to automatically determine target files
 - [ ] Add robust error handling and retries for API calls
 - [ ] Create a more sophisticated review and revision loop
-```
