@@ -22,6 +22,7 @@ async def solve_github_issue_flow(
     issue_url: str,
     repo_owner_override: Optional[str] = None,
     repo_name_override: Optional[str] = None,
+    target_file_override: Optional[str] = None,
 ):
     print(f"\n🚀 Starting GitHub Issue Solver for: {issue_url}\n" + "=" * 50)
 
@@ -40,7 +41,6 @@ async def solve_github_issue_flow(
             return
     print(f"Target Repository: {repo_owner}/{repo_name}")
 
-    # --- NEW: Get the default branch for the repository ---
     github_client = GitHubClient()
     print("📋 Fetching default branch name...")
     default_branch_name = await github_client.get_default_branch(repo_owner, repo_name)
@@ -158,24 +158,29 @@ async def solve_github_issue_flow(
         return
     print(f"Successfully processed issue #{issue_number}: '{issue_title}'")
 
-    # --- Step 1.5: Identifying Target File ---
-    print(f"\n📑 Step 1.5: Identifying Target File for issue #{issue_number}...")
-    identifier_input = (
-        f"Based on the following GitHub issue, identify the single file that needs to be modified.\n"
-        f"Repository: {repo_owner}/{repo_name}\n"
-        f"Default Branch: {default_branch_name}\n"
-        f"Issue Title: {issue_title}\n"
-        f"Issue Body:\n{issue_body}\n\n"
-        f"Labels: {', '.join(issue_labels)}\n"
-    )
-    identifier_run = await runner.run(file_identifier, input=identifier_input)
-    target_file_path = identifier_run.final_output.strip()
+    # --- Step 1.5: Identify Target File or Use Override ---
+    target_file_path: Optional[str] = None
+    if target_file_override:
+        target_file_path = target_file_override
+        print(f"\n✅ User-specified target file: {target_file_path}. Skipping file identification step.\n")
+    else:
+        print(f"\n📑 Step 1.5: Identifying Target File for issue #{issue_number}...")
+        identifier_input = (
+            f"Based on the following GitHub issue, identify the single file that needs to be modified.\n"
+            f"Repository: {repo_owner}/{repo_name}\n"
+            f"Default Branch: {default_branch_name}\n"
+            f"Issue Title: {issue_title}\n"
+            f"Issue Body:\n{issue_body}\n\n"
+            f"Labels: {', '.join(issue_labels)}\n"
+        )
+        identifier_run = await runner.run(file_identifier, input=identifier_input)
+        target_file_path = identifier_run.final_output.strip()
+        print(f"File Identifier Agent identified target file: {target_file_path}\n")
 
-    if not target_file_path or "/" not in target_file_path:
-        print(f"❌ Error: FileIdentifierAgent did not return a valid file path. Output was: '{target_file_path}'")
+    # CORRECTED a bug here: The check was too strict and did not allow for files in the root directory.
+    if not target_file_path:
+        print(f"❌ Error: Could not determine a valid target file. Path was: '{target_file_path}'")
         return
-    print(f"File Identifier Agent identified target file: {target_file_path}\n")
-
 
     # --- Step 2: Propose Initial Code Solution ---
     print(f"\n💡 Step 2: Proposing Initial Code Solution for issue #{issue_number}...")
@@ -460,7 +465,11 @@ async def solve_github_issue_flow(
     ]
     summary_comment_parts.append(f"\n**Triage Summary:**\n{triage_output_summary}")
 
-    summary_comment_parts.append(f"\n**File Identification:**\nAn agent identified `{target_file_path}` as the target file for the fix.")
+    if target_file_override:
+        summary_comment_parts.append(f"\n**File Identification:**\nUser specified the target file: `{target_file_path}`.")
+    else:
+        summary_comment_parts.append(f"\n**File Identification:**\nAn agent identified `{target_file_path}` as the target file for the fix.")
+
 
     if proposed_solution_markdown:
         summary_comment_parts.append(
@@ -529,6 +538,12 @@ def main():
         default="bgreenwell",
         help="The GitHub user ID or organization. Defaults to 'bgreenwell'.",
     )
+    parser.add_argument(
+        '--target_file',
+        '-f',
+        default=None,
+        help='(Optional) The target file path to fix. If not provided, an agent will identify it.'
+    )
     args = parser.parse_args()
 
     issue_url = (
@@ -546,6 +561,7 @@ def main():
             issue_url=issue_url,
             repo_owner_override=args.user_id,
             repo_name_override=args.repo_name,
+            target_file_override=args.target_file,
         )
     )
 

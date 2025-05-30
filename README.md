@@ -1,8 +1,6 @@
-Of course. That's a critical clarification to make for anyone using the tool. Clear documentation prevents confusion and errors.
+Excellent point. The documentation should always keep pace with new features. Here is the updated `README.md` with the explanation of the optional `--target_file` argument.
 
-Here is the updated content for your `README.md`. I've revised the "Environment Variables" and "Arguments" sections to explain the relationship between the token and the user ID.
-
-### Updated File: `README.md`
+### Updated `README.md`
 ```markdown
 # OctoAgent 🐙🕵️
 
@@ -25,7 +23,7 @@ The project is organized into a Python package within the `src` directory for be
 ├── .gitignore
 ├── src/
 │   └── octoagent/
-│       ├── __init__.py         # Makes 'octoagent' a Python package
+│       ├── __init__.py         # Makes 'octoragent' a Python package
 │       ├── agents.py           # All agent class definitions
 │       ├── github_client.py    # Handles all GitHub API interactions
 │       ├── tools.py            # Agent tools and utility functions
@@ -64,33 +62,37 @@ export GITHUB_TOKEN="your_github_personal_access_token"
 
 ## How to Run
 
-The application is run from the command line, specifying the repository, issue number, and the target file for the fix.
+The application is run from the command line, specifying the repository, issue number, and other options.
 
 ### Command Structure
 ```bash
-python -m src.octoagent.main <repo_name> <issue_number> <target_file> [--user_id <github_user_or_org>]
+python -m src.octoagent.main <repo_name> <issue_number> [--user_id <user_id>] [--target_file <path>]
 ```
 
 ### Arguments
 * `repo_name`: The name of the repository.
 * `issue_number`: The number of the issue you want to solve.
-* `target_file`: The full path to the file within the repository that should be modified.
 * `--user_id` (optional): The GitHub username or organization that owns the repository. The provided `GITHUB_TOKEN` must have permissions for this user/organization's repository. **Defaults to `bgreenwell`**.
+* `--target_file`, `-f` (optional): The full path to the file that should be modified. If provided, this will skip the agent-based file identification step.
 
 ### Examples
 
-1.  **Run on an issue in the default `bgreenwell` account:**
-    The following command attempts to solve issue #12 in the `bgreenwell/statlingua` repository by modifying the `R/explain.R` file.
-
+1.  **Run in autonomous mode:**
+    This command attempts to solve issue #12 in the `bgreenwell/statlingua` repository, letting the agent identify the correct file to fix.
     ```bash
-    python -m src.octoagent.main statlingua 12 R/explain.R
+    python -m src.octoragent.main statlingua 12
     ```
 
-2.  **Run on an issue in another user's repository:**
+2.  **Run on another user's repository:**
     To target a repository under a different user or organization, use the `--user_id` flag.
-
     ```bash
-    python -m src.octoagent.main some-awesome-repo 42 src/app/main.py --user_id another-developer
+    python -m src.octoragent.main some-awesome-repo 42 --user_id another-developer
+    ```
+    
+3.  **Run with a specific target file to override the agent:**
+    If you already know which file needs to be fixed, you can specify it directly to skip the file identification step.
+    ```bash
+    python -m src.octoragent.main ramify 15 --target_file ".gitignore"
     ```
 
 ## TODO
