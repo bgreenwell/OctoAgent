@@ -12,7 +12,8 @@ from .tools import (
     post_comment_to_github,
     list_repository_files,
     commit_files_to_branch,
-    get_file_content
+    delete_file_from_branch,
+    get_file_content # Crucial for CodeProposerAgent
 )
 
 
@@ -109,6 +110,7 @@ class PlannerAgent(ReusableAgent):
     """
     An agent that analyzes a triaged GitHub issue and creates a
     high-level, step-by-step plan to address it.
+    The plan should consider operations like file creation, modification, deletion, and renames.
     """
     def __init__(self, **kwargs):
         super().__init__(
@@ -117,8 +119,10 @@ class PlannerAgent(ReusableAgent):
                 "You are an expert software project planner. Based on the provided GitHub issue details "
                 "(title, body, labels, triage summary), your task is to create a concise, actionable, "
                 "step-by-step plan to guide the resolution of this issue. "
-                "The plan should outline the logical sequence of actions needed, such as "
-                "'1. Identify affected file(s).', '2. Draft code changes for each affected file.', '3. Review solution.', etc. "
+                "The plan should outline the logical sequence of actions needed, considering operations like "
+                "file identification, code changes (creations, modifications), file deletions (e.g., for renames), reviews, branching, and committing. "
+                "For example: '1. Identify original file `old_path/file.py` and target `new_path/file.py` for rename operation.', "
+                "'2. Plan deletion of `old_path/file.py`.', '3. Plan content for `new_path/file.py`.', etc. "
                 "Focus on a high-level strategy. Output the plan as a numbered list."
             ),
             **kwargs
@@ -126,17 +130,22 @@ class PlannerAgent(ReusableAgent):
 
 
 class FileIdentifierAgent(ReusableAgent):
-    """An agent that identifies the target file(s) to fix for an issue."""
+    """An agent that identifies the target file(s) to fix for an issue, considering renames."""
     def __init__(self, **kwargs):
         super().__init__(
             name="FileIdentifierAgent",
             instructions=(
-                "You are an expert software architect. Your task is to identify which file(s) in a repository "
-                "most likely need to be modified to address a given GitHub issue. "
-                "You will be provided with the issue details (title, body, labels) and the overall plan. "
-                "Use the `list_repository_files` tool to see the repository's file structure. "
-                "Based on the issue description, the plan, and the list of files, determine the relevant file paths. "
-                "Output ONLY the full file paths, each on a new line. If no files seem to need changes, output 'None'."
+                "You are an expert software architect. Your task is to analyze a GitHub issue and the overall plan, "
+                "then identify all relevant file paths for the required operations. "
+                "Consider creations, modifications, and especially renames or deletions implied by the issue or plan.\n"
+                "- For modifications to existing files, list their current paths.\n"
+                "- For new files to be created (e.g., for a new feature), suggest a suitable new file path.\n"
+                "- If a file is to be renamed or moved (e.g., from `old/path.py` to `new/path.py`), "
+                "list BOTH the old path (as a source for deletion/reference) AND the new path (as a target for new content).\n"
+                "- If a directory rename (e.g. `old_dir/` to `new_dir/`) affects files within, list relevant files using their "
+                "OLD paths (e.g., `old_dir/file.py`) if they are sources for deletion/move, and their NEW paths "
+                "(e.g., `new_dir/file.py`) if they are targets for new/modified content.\n"
+                "Output ONLY the full file paths, each on a new line. If no specific files are involved, output 'None'."
             ),
             tools=[list_repository_files],
             **kwargs
@@ -145,83 +154,102 @@ class FileIdentifierAgent(ReusableAgent):
 
 class CodeProposerAgent(ReusableAgent):
     """An agent that proposes code solutions for GitHub issues across multiple files,
-    intelligently merging changes with existing content."""
+    intelligently merging changes with existing content and explaining assumptions."""
     def __init__(self, **kwargs):
         super().__init__(
             name="CodeProposer",
             instructions=(
-                "You are an expert software developer. Based on the provided GitHub issue details, "
-                "the overall plan, and a list of relevant file paths, propose all necessary file operations.\n"
-                "For each file in the 'Relevant File Paths Identified' list:\n"
-                "1. Determine if the file needs creation, modification, or is part of a rename (implying deletion of an old path and creation/modification at a new path).\n"
-                "2. If modifying an EXISTING file: Use the `get_file_content` tool to fetch its current content. "
-                "   Then, carefully integrate your proposed changes (e.g., adding new functions, modifying existing logic) "
-                "   with the fetched content to produce the **complete, new file content**. \n"
-                "3. If creating a NEW file: Generate the complete initial content for this new file.\n"
-                "Output your proposals using the following formats:\n"
-                "- For creating or modifying a file (e.g., `path/to/file.ext`): "
-                "State 'Changes for `path/to/file.ext`:' "
+                "You are an expert software developer. Your task is to propose all necessary file operations "
+                "(creations, modifications, deletions) based on GitHub issue details, an overall plan, "
+                "and a list of relevant file paths.\n\n"
+                "**Core Task & Output Format:**\n"
+                "For each file identified as relevant:\n"
+                "1.  **Analyze Intent:** Determine if the goal is to add new functionality, modify existing "
+                "functionality, create a new file, or delete an old file (e.g., for a rename).\n"
+                "2.  **Fetch Existing Content (for modifications/additions):** If modifying or adding to an EXISTING file, "
+                "you MUST first use the `get_file_content` tool to fetch its current content. If the tool indicates the file "
+                "does not exist, treat it as a new file creation.\n"
+                "3.  **Integrate Changes Carefully:**\n"
+                "    * **Additive Changes:** If the issue/plan asks to 'add' new functionality (e.g., a new function or class to an existing file), "
+                "your primary goal is to introduce this new code while **preserving all existing, unrelated code and structures in the file.** "
+                "Do not remove or refactor existing code unless explicitly requested by the issue or plan. Find an appropriate logical place for the new code.\n"
+                "    * **Modifications to Existing Code:** When modifying existing code, integrate your changes precisely into the fetched content, "
+                "preserving unchanged parts.\n"
+                "4.  **State Assumptions:** If the issue or plan is vague (e.g., 'add a utility function' without full specs), "
+                "make a reasonable, simple choice for the implementation. **Before any file operations, include a section titled 'Assumptions Made:' "
+                "listing choices you made (e.g., 'Assumed new math operator should be exponentiation.')**\n"
+                "5.  **Output Operations Clearly (after stating assumptions, if any):**\n"
+                "    * **To Modify/Create a File:** State 'Changes for `path/to/file.ext`:' "
                 "followed by the **ENTIRE new file content** in a single markdown code block "
-                "with the appropriate language identifier.\n"
-                "- If deleting a file (e.g., `old_path/file.ext` as part of a rename, or if explicitly requested): "
-                "State 'Delete file: `old_path/file.ext`'. (Do not provide a code block for deletions).\n"
-                "- If a file from the identified list needs no changes: "
-                "State 'No changes needed for `path/to/file.ext`.'\n"
-                "Ensure your response clearly lists all intended operations. If the issue is vague (e.g., 'add a math function'), "
-                "make a reasonable choice for a simple implementation and clearly state assumptions made. "
-                "When modifying, be very careful to preserve existing code that is not meant to be changed."
+                "with the appropriate language identifier. For example:\n"
+                "        Changes for `calculator.py`:\n"
+                "        ```python\n"
+                "        # original content of calculator.py (if any)\n"
+                "        # ...\n"
+                "        # your new or modified function here, integrated correctly\n"
+                "        # ...\n"
+                "        # rest of original content (if any)\n"
+                "        ```\n"
+                "    * **To Delete a File:** State 'Delete file: `path/to/file.ext`'. "
+                "(Do not provide a code block for deletions).\n"
+                "    * **For No Change:** If a file from the identified list needs no changes, "
+                "state 'No changes needed for `path/to/file.ext`.'\n"
+                "6.  **Self-Critique (Briefly, before finalizing output):** Mentally review: Does your proposal fully address "
+                "the specific requirements for each file? Is existing unrelated code correctly preserved for additive changes? "
+                "Are all necessary operations included?\n\n"
+                "Ensure your response clearly lists all intended operations. If revising based on feedback, "
+                "address the feedback specifically for the indicated files/operations, remembering to fetch existing content if modifying."
             ),
-            tools=[get_file_content], # Add the new tool
+            tools=[get_file_content],
             **kwargs
         )
 
 
 class CodeReviewerAgent(ReusableAgent):
     """
-    An agent that reviews proposed code solutions for multiple files.
-
-    Parameters
-    ----------
-    review_aspect : str, optional
-        The specific aspect of the code to focus on (e.g., "code style").
-        Defaults to "general code quality".
-    **kwargs : dict
-        Additional keyword arguments passed to the ReusableAgent.
+    An agent that reviews proposed file operations (creations, modifications, deletions).
     """
     def __init__(self, review_aspect: str = "general code quality", **kwargs):
         super().__init__(
             name=f"{review_aspect.replace(' ', '')}Reviewer",
             instructions=(
                 f"You are a meticulous code reviewer specializing in {review_aspect}. "
-                "You will be given GitHub issue details, an overall plan, and a list of proposed code changes, "
-                "each for a specific file. Provide a concise review for EACH file's proposed changes. Focus on: "
-                f"- {review_aspect.capitalize()} for each file.\n"
-                "- Correctness and completeness of the solution regarding the issue and its intended file.\n"
-                "- Potential bugs or edge cases.\n"
+                "You will be given GitHub issue details, an overall plan, and a list of proposed file operations "
+                "(creations/modifications with code, or deletions). Also, the proposer may have stated some assumptions made. "
+                "Provide a concise review for EACH proposed operation. Consider the assumptions and focus on: "
+                f"- {review_aspect.capitalize()} for any code changes.\n"
+                "- Correctness of deletions or renames in context of the issue and plan.\n"
+                "- Whether proposed changes correctly integrate with existing code, preserving unrelated functionality.\n"
+                "- Completeness of the solution regarding the issue and its intended files.\n"
+                "- Potential bugs or edge cases from code changes.\n"
                 "- Adherence to coding best practices and style guidelines for the inferred language.\n"
                 "- Clarity and maintainability.\n"
-                "If all proposed changes across all files are satisfactory, state ONLY 'LGTM!' or 'Satisfactory' or 'Approved'. "
-                "If changes are needed for ANY file, state 'Needs revision.' as the first part of your response, "
-                "then for each file needing changes, clearly list the file path and the required revisions for that specific file."
+                "If all proposed operations are satisfactory, state ONLY 'LGTM!' or 'Satisfactory' or 'Approved'. "
+                "If changes are needed for ANY operation, state 'Needs revision.' as the first part of your response, "
+                "then for each operation needing changes, clearly list the file path and the required revisions "
+                "(e.g., for code changes, or if a deletion is inappropriate/missing, or if an assumption made by the proposer is incorrect)."
             ),
             **kwargs
         )
 
 
 class CodeCommitterAgent(ReusableAgent):
-    """An agent that commits multiple files to a branch using a tool."""
+    """An agent that commits file changes (creations, updates, deletions) to a branch."""
     def __init__(self, **kwargs):
-        # The tool 'commit_files_to_branch' is now imported at the module level.
         super().__init__(
             name="CodeCommitter",
             instructions=(
-                "You are a Git assistant. Your task is to commit a list of file changes to a specified branch. "
-                "You will receive the repository owner, repository name, branch name, commit message, "
-                "and a list of file changes (each with a file path and code content). "
-                "Use the `commit_files_to_branch` tool to perform this action. "
-                "Summarize the result of the commit attempts based on the tool's output."
+                "You are a Git assistant. Your task is to apply a list of file operations to a specified branch. "
+                "You will receive the repository owner, repository name, branch name, a base commit message, "
+                "and a list of file operations. Each operation will specify a 'file_path', an 'action' "
+                "('modify', 'create', 'delete'), and 'file_content' (if action is 'modify' or 'create').\n"
+                "- For 'delete' actions, use the `delete_file_from_branch` tool for each specific file. Provide a commit message like '[Base Commit Message] - delete old_file.py'.\n"
+                "- For 'modify' or 'create' actions, use the `commit_files_to_branch` tool. You can batch "
+                "multiple creations/modifications into a single call to this tool if they share the same base commit message, or commit them one by one. The tool itself handles per-file commit messages if batching.\n"
+                "Perform deletions before creations/modifications if they involve a rename (e.g., delete an old path then create/modify a new path). "
+                "Summarize the result of all commit/deletion attempts based on the tools' outputs."
             ),
-            tools=[commit_files_to_branch],
+            tools=[commit_files_to_branch, delete_file_from_branch],
             **kwargs
         )
 
@@ -246,4 +274,3 @@ class CommentPosterAgent(ReusableAgent):
     """An agent that posts comments to GitHub issues."""
     def __init__(self, **kwargs):
         super().__init__(name="CommentPoster", instructions="Post comments to GitHub issues using the post_comment_to_github tool.", tools=[post_comment_to_github], **kwargs)
-        
