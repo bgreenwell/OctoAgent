@@ -23,6 +23,7 @@ async def solve_github_issue_flow(
     repo_owner_override: Optional[str] = None,
     repo_name_override: Optional[str] = None,
     target_file_override: Optional[str] = None,
+    max_review_cycles_override: int = 3,
 ):
     """
     Orchestrates the end-to-end flow of agents to solve a GitHub issue.
@@ -31,7 +32,8 @@ async def solve_github_issue_flow(
     1.  Triage the issue to understand its details.
     2.  Identify the target file to be fixed (or use a user-provided override).
     3.  Propose a code solution.
-    4.  Review the proposed code for technical correctness and style.
+    4.  Review the proposed code for technical correctness and style (up to a
+        configurable number of cycles).
     5.  Create a new branch for the fix.
     6.  Commit the finalized code to the new branch.
     7.  Post a summary comment on the original GitHub issue.
@@ -47,6 +49,8 @@ async def solve_github_issue_flow(
     target_file_override : str, optional
         If provided, this file path will be used directly, skipping the
         FileIdentifierAgent step. Defaults to None.
+    max_review_cycles_override : int, optional
+        The maximum number of review cycles for code proposals. Defaults to 3.
     """
     print(f"\n🚀 Starting GitHub Issue Solver for: {issue_url}\n" + "=" * 50)
 
@@ -229,7 +233,7 @@ async def solve_github_issue_flow(
         current_proposed_code = None
 
     # --- Step 2.5: Review and Revision Loop ---
-    max_review_cycles = 3
+    max_review_cycles = max_review_cycles_override # Use the override or default
     tech_feedback = "No feedback yet."
     style_feedback = "No feedback yet."
     solution_satisfactory = False
@@ -572,6 +576,12 @@ def main():
         default=None,
         help='(Optional) The target file path to fix. If not provided, an agent will identify it.'
     )
+    parser.add_argument(
+        '--max_review_cycles',
+        type=int,
+        default=3,
+        help='The maximum number of review cycles for code proposals. Defaults to 3.'
+    )
     args = parser.parse_args()
 
     issue_url = (
@@ -590,6 +600,7 @@ def main():
             repo_owner_override=args.user_id,
             repo_name_override=args.repo_name,
             target_file_override=args.target_file,
+            max_review_cycles_override=args.max_review_cycles,
         )
     )
 

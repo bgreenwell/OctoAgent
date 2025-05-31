@@ -64,7 +64,7 @@ The application is run from the command line, specifying the repository, issue n
 
 ### Command Structure
 ```bash
-python -m src.octoagent.main <repo_name> <issue_number> [--user_id <user_id>] [--target_file <path>]
+python -m src.octoagent.main <repo_name> <issue_number> [--user_id <user_id>] [--target_file <path>] [--max_review_cycles <int>]
 ```
 
 ### Arguments
@@ -72,6 +72,7 @@ python -m src.octoagent.main <repo_name> <issue_number> [--user_id <user_id>] [-
 * `issue_number`: The number of the issue you want to solve.
 * `--user_id` (optional): The GitHub username or organization that owns the repository. The provided `GITHUB_TOKEN` must have permissions for this user/organization's repository. **Defaults to `bgreenwell`**.
 * `--target_file`, `-f` (optional): The full path to the file that should be modified. If provided, this will skip the agent-based file identification step.
+* `--max_review_cycles` (optional): The maximum number of review cycles for code proposals. Defaults to 3.
 
 ### Examples
 
@@ -92,6 +93,40 @@ To target a repository under a different user or organization, use the `--user_i
     ```bash
     python -m src.octoagent.main ramify 15 --target_file ".gitignore"
     ```
+
+4. **Run with a different number of review cycles:**
+You can control the code revision process by setting the maximum number of review cycles.
+```bash
+python -m src.octoragent.main statlingua 12 --max_review_cycles 1
+```
+
+## Writing Agent-Friendly Issues
+
+While **OctoAgent** is designed to understand a variety of issue formats, providing a well-structured issue will significantly improve its accuracy and speed. A detailed and clear issue helps the agents identify the correct files and propose better solutions.
+
+Here is a recommended template for bug reports:
+
+```markdown
+### Bug Report
+
+**Description**
+A clear and concise description of what the bug is. Why is it a bug and what is the expected outcome?
+
+**To Reproduce**
+Steps to reproduce the behavior:
+1. Go to '...'
+2. Use this input '....'
+3. See error log: `...`
+
+**Expected behavior**
+A clear and concise description of what you expected to happen.
+
+**Relevant Files (Optional but Recommended)**
+If you have a hunch, list any files you suspect might be related to the issue. This is extremely helpful for the `FileIdentifierAgent`.
+- `src/app/module.py`
+- `src/utils/helpers.py`
+```
+For feature requests, please describe the problem you're trying to solve and your proposed solution in as much detail as possible.
 
 ## TODO
 
