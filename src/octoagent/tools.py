@@ -53,6 +53,40 @@ def parse_github_issue_url(issue_url: str) -> Optional[Tuple[str, str, int]]:
 github_client = GitHubClient()
 
 @function_tool
+async def get_file_content(repo_owner: str, repo_name: str, file_path: str, branch: str) -> Dict[str, Any]:
+    """
+    Fetches the current content of a specific file from a repository.
+    Useful for an agent that needs to modify an existing file.
+
+    Parameters
+    ----------
+    repo_owner : str
+        The owner of the repository.
+    repo_name : str
+        The name of the repository.
+    file_path : str
+        The path of the file whose content is to be fetched.
+    branch : str
+        The branch on which the file resides.
+
+    Returns
+    -------
+    dict
+        A dictionary containing the file_path, its content (as a string),
+        its sha, and a status. If the file is not found or an error occurs,
+        the content will be None or an error message will be included.
+    """
+    print(f"Tool (tools.py): Getting content for {repo_owner}/{repo_name}/{file_path} on branch {branch}")
+    result = await github_client.get_file_content_from_repo(repo_owner, repo_name, file_path, branch)
+    if result and "error" in result:
+        # Return the error structure so the agent knows something went wrong
+        return {"file_path": file_path, "content": None, "status": result.get("status", "error"), "error_message": result["error"]}
+    elif result:
+        return result # Contains file_path, content, sha, status
+    else: # Should not happen if get_file_content_from_repo always returns a dict
+        return {"file_path": file_path, "content": None, "status": "unknown_error", "error_message": "Unknown error fetching file content."}
+
+@function_tool
 async def download_github_issue(issue_url: str) -> Dict[str, Any]:
     """
     Fetches the details of a GitHub issue from its URL.

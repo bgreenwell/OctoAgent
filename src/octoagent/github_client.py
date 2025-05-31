@@ -105,6 +105,60 @@ class GitHubClient:
             print(f"Error getting default branch for {owner}/{repo}: {e}")
             return None
 
+    async def get_file_content_from_repo(self, owner: str, repo: str, file_path: str, branch: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves the content of a specific file from a repository.
+
+        Parameters
+        ----------
+        owner : str
+            The owner of the repository.
+        repo : str
+            The name of the repository.
+        file_path : str
+            The path to the file within the repository.
+        branch : str
+            The name of the branch.
+
+        Returns
+        -------
+        dict or None
+            A dictionary containing 'content' (decoded string) and 'sha' of the file,
+            or None if the file is not found or an error occurs.
+            Content is None if it's a directory or submodule.
+        """
+        endpoint = f"/repos/{owner}/{repo}/contents/{file_path}?ref={branch}"
+        print(f"GitHubClient: Fetching content for {owner}/{repo}/{file_path} on branch {branch}")
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda: self._make_request("GET", endpoint))
+            response.raise_for_status() # Will raise HTTPError for 404, etc.
+            
+            response_json = response.json()
+            if isinstance(response_json, list): # API returns a list if path is a directory
+                return {"error": "Path is a directory, not a file.", "status": "is_directory"}
+
+            if response_json.get("type") != "file":
+                return {"error": f"Path is not a file (type: {response_json.get('type')}).", "status": "not_a_file"}
+
+            content_base64 = response_json.get("content")
+            if content_base64:
+                decoded_content = base64.b64decode(content_base64).decode('utf-8')
+                return {
+                    "file_path": file_path,
+                    "content": decoded_content,
+                    "sha": response_json.get("sha"),
+                    "status": "success"
+                }
+            else: # Should not happen for type 'file' but good to check
+                return {"error": "File content is empty or not available.", "status": "empty_content"}
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                return {"error": f"File not found: {file_path}", "status": "not_found"}
+            return {"error": f"HTTPError fetching file: {e.response.status_code} {e.response.reason}", "details_text": e.response.text, "status": "http_error"}
+        except Exception as e:
+            return {"error": f"An unexpected error occurred fetching file content: {str(e)}", "status": "unknown_error"}
+
     async def list_files_in_repo(self, owner: str, repo: str, branch: str = "main") -> Dict[str, Any]:
         """
         Lists all files in a repository recursively for a given branch.

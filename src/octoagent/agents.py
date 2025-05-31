@@ -9,10 +9,10 @@ from agents import Agent as BaseAgent, Runner
 from .tools import (
     download_github_issue,
     create_pr_branch,
-    # commit_code_to_branch, # This was the old tool, now removed
     post_comment_to_github,
     list_repository_files,
-    commit_files_to_branch   # This is the new tool for multi-file commits
+    commit_files_to_branch,
+    get_file_content
 )
 
 
@@ -144,21 +144,34 @@ class FileIdentifierAgent(ReusableAgent):
 
 
 class CodeProposerAgent(ReusableAgent):
-    """An agent that proposes code solutions for GitHub issues across multiple files."""
+    """An agent that proposes code solutions for GitHub issues across multiple files,
+    intelligently merging changes with existing content."""
     def __init__(self, **kwargs):
         super().__init__(
             name="CodeProposer",
             instructions=(
                 "You are an expert software developer. Based on the provided GitHub issue details, "
-                "the overall plan, and a list of target file paths, propose code solutions. "
-                "For each file in the provided list that requires changes, clearly state 'Changes for `path/to/file.ext`:' "
-                "followed by the complete proposed code for that file in a single markdown code block "
-                "with the appropriate language identifier (e.g., ```python ... ``` or ```r ... ```). "
-                "If a file in the list does not need changes, state 'No changes needed for `path/to/file.ext`.' "
-                "If the issue is unclear or lacks enough information to propose a specific code fix for any file, "
-                "state what additional information is needed for those files. "
-                "If you are revising based on feedback, clearly state that and incorporate the feedback into the new code proposals for the specified files."
+                "the overall plan, and a list of relevant file paths, propose all necessary file operations.\n"
+                "For each file in the 'Relevant File Paths Identified' list:\n"
+                "1. Determine if the file needs creation, modification, or is part of a rename (implying deletion of an old path and creation/modification at a new path).\n"
+                "2. If modifying an EXISTING file: Use the `get_file_content` tool to fetch its current content. "
+                "   Then, carefully integrate your proposed changes (e.g., adding new functions, modifying existing logic) "
+                "   with the fetched content to produce the **complete, new file content**. \n"
+                "3. If creating a NEW file: Generate the complete initial content for this new file.\n"
+                "Output your proposals using the following formats:\n"
+                "- For creating or modifying a file (e.g., `path/to/file.ext`): "
+                "State 'Changes for `path/to/file.ext`:' "
+                "followed by the **ENTIRE new file content** in a single markdown code block "
+                "with the appropriate language identifier.\n"
+                "- If deleting a file (e.g., `old_path/file.ext` as part of a rename, or if explicitly requested): "
+                "State 'Delete file: `old_path/file.ext`'. (Do not provide a code block for deletions).\n"
+                "- If a file from the identified list needs no changes: "
+                "State 'No changes needed for `path/to/file.ext`.'\n"
+                "Ensure your response clearly lists all intended operations. If the issue is vague (e.g., 'add a math function'), "
+                "make a reasonable choice for a simple implementation and clearly state assumptions made. "
+                "When modifying, be very careful to preserve existing code that is not meant to be changed."
             ),
+            tools=[get_file_content], # Add the new tool
             **kwargs
         )
 
