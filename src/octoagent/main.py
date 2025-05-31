@@ -6,7 +6,7 @@ import re
 import json
 from typing import Any, Dict, List, Optional
 
-from agents import Runner, ToolCallItem, ToolCallOutputItem
+from agents import Runner, ToolCallItem, ToolCallOutputItem 
 from .agents import (
     BranchCreatorAgent,
     CodeCommitterAgent,
@@ -88,94 +88,100 @@ async def solve_github_issue_flow(
         print(f"DEBUG: Running agent: {agent_name_for_log}, Input (first 100 chars): {input_text[:100]}...")
         run_result = await runner.run(agent_instance, input=input_text, **kwargs)
         
-        direct_usage_data = None
-        direct_model_from_response = None
+        print(f"DEBUG: [{agent_name_for_log}] --- RunResult Details ---")
+        print(f"DEBUG: [{agent_name_for_log}] type(run_result): {type(run_result)}")
+        try:
+            print(f"DEBUG: [{agent_name_for_log}] dir(run_result): {dir(run_result)}")
+        except Exception as e:
+            print(f"DEBUG: [{agent_name_for_log}] Error inspecting run_result with dir(): {e}")
 
-        if hasattr(run_result, 'raw_response') and run_result.raw_response is not None:
-            print(f"DEBUG: [{agent_name_for_log}] RunResult has 'raw_response'. Type: {type(run_result.raw_response)}")
-            response_obj = run_result.raw_response
-            if hasattr(response_obj, 'usage') and getattr(response_obj, 'usage') is not None:
-                direct_usage_data = response_obj.usage
-            if hasattr(response_obj, 'model') and isinstance(getattr(response_obj, 'model'), str):
-                direct_model_from_response = response_obj.model
+        found_tokens_for_this_run = False
         
-        if direct_usage_data:
-            prompt_tokens_val = 0
-            completion_tokens_val = 0
-            if isinstance(direct_usage_data, dict):
-                prompt_tokens_val = direct_usage_data.get("prompt_tokens", 0)
-                completion_tokens_val = direct_usage_data.get("completion_tokens", 0)
-                print(f"DEBUG: [{agent_name_for_log}] Usage from RunResult.raw_response (dict): P={prompt_tokens_val}, C={completion_tokens_val}")
-            elif hasattr(direct_usage_data, 'prompt_tokens') and hasattr(direct_usage_data, 'completion_tokens'):
-                prompt_tokens_val = getattr(direct_usage_data, "prompt_tokens", 0)
-                completion_tokens_val = getattr(direct_usage_data, "completion_tokens", 0)
-                print(f"DEBUG: [{agent_name_for_log}] Usage from RunResult.raw_response (object): P={prompt_tokens_val}, C={completion_tokens_val}")
-
-            if isinstance(prompt_tokens_val, int) and isinstance(completion_tokens_val, int):
-                total_prompt_tokens += prompt_tokens_val
-                total_completion_tokens += completion_tokens_val
-        
-        if direct_model_from_response and (actual_model_name_reported == model_to_use or actual_model_name_reported == "Unknown" or actual_model_name_reported != direct_model_from_response):
-            actual_model_name_reported = direct_model_from_response
-            print(f"DEBUG: [{agent_name_for_log}] Model from RunResult.raw_response: {actual_model_name_reported}")
-
-        if (not direct_usage_data or (total_prompt_tokens == 0 and total_completion_tokens == 0)) and \
-           hasattr(run_result, 'new_items') and run_result.new_items:
-             print(f"DEBUG: [{agent_name_for_log}] Token usage not found on RunResult directly or was zero. Iterating {len(run_result.new_items)} new_items.")
-             for i, item in enumerate(run_result.new_items):
-                print(f"DEBUG: [{agent_name_for_log}] Item {i} type: {type(item)}")
-                if not isinstance(item, (str, int, float, bool, list, dict)) and item is not None:
-                    try: print(f"DEBUG: [{agent_name_for_log}] Item {i} dir(): {dir(item)}")
-                    except: pass
-                
-                raw_api_response_object = None
-                item_usage_data = None
-                item_model_from_response = None
-
-                if hasattr(item, 'raw_item'):
-                    raw_api_response_object = getattr(item, 'raw_item')
-                    print(f"DEBUG: [{agent_name_for_log}] Item {i} has raw_item. Type: {type(raw_api_response_object)}")
+        # Check the 'raw_responses' attribute of RunResult
+        if hasattr(run_result, 'raw_responses') and run_result.raw_responses:
+            print(f"DEBUG: [{agent_name_for_log}] Found 'raw_responses' on RunResult. Count: {len(run_result.raw_responses)}")
+            for i, model_response_item in enumerate(run_result.raw_responses): # Each item here should be agents.items.ModelResponse
+                print(f"DEBUG: [{agent_name_for_log}] Processing raw_responses[{i}], type: {type(model_response_item)}")
+                # The 'usage' attribute on ModelResponse should be the Usage dataclass
+                if hasattr(model_response_item, 'usage') and model_response_item.usage is not None:
+                    usage_stats = model_response_item.usage
+                    print(f"DEBUG: [{agent_name_for_log}] Found usage object on raw_responses[{i}].usage: {usage_stats}, type: {type(usage_stats)}")
                     
-                    if hasattr(raw_api_response_object, 'usage') and getattr(raw_api_response_object, 'usage') is not None and \
-                       hasattr(raw_api_response_object, 'model') and getattr(raw_api_response_object, 'model') is not None:
-                        usage_attr = raw_api_response_object.usage
-                        item_model_from_response = raw_api_response_object.model
-                        print(f"DEBUG: [{agent_name_for_log}] Extracted from raw_item attributes: model='{item_model_from_response}', usage_obj='{usage_attr}'")
-                        if hasattr(usage_attr, 'prompt_tokens') and hasattr(usage_attr, 'completion_tokens'):
-                             item_usage_data = {"prompt_tokens": getattr(usage_attr, "prompt_tokens", 0), "completion_tokens": getattr(usage_attr, "completion_tokens", 0)}
-                        elif isinstance(usage_attr, dict): item_usage_data = usage_attr
-                    elif isinstance(raw_api_response_object, dict):
-                        item_usage_data = raw_api_response_object.get('usage')
-                        item_model_from_response = raw_api_response_object.get('model')
-                        if item_usage_data: print(f"DEBUG: [{agent_name_for_log}] Found usage_data in raw_item dict: {item_usage_data}")
-                        if item_model_from_response: print(f"DEBUG: [{agent_name_for_log}] Found model in raw_item dict: {item_model_from_response}")
-                elif hasattr(item, 'usage') and isinstance(getattr(item, 'usage'), dict): # Fallback for item itself
-                    item_usage_data = getattr(item, 'usage')
-                    print(f"DEBUG: [{agent_name_for_log}] Item {i} has direct 'usage' attribute: {item_usage_data}")
-                    if hasattr(item, 'model') and isinstance(getattr(item, 'model'), str):
-                        item_model_from_response = getattr(item, 'model')
-                        print(f"DEBUG: [{agent_name_for_log}] Item {i} has direct 'model' attribute: {item_model_from_response}")
+                    if hasattr(usage_stats, 'input_tokens') and hasattr(usage_stats, 'output_tokens'):
+                        prompt_t = int(getattr(usage_stats, 'input_tokens', 0))
+                        completion_t = int(getattr(usage_stats, 'output_tokens', 0))
+                        
+                        print(f"DEBUG: [{agent_name_for_log}] Tokens from raw_responses[{i}].usage: Prompt={prompt_t}, Completion={completion_t}")
+                        if prompt_t > 0 or completion_t > 0:
+                            total_prompt_tokens += prompt_t
+                            total_completion_tokens += completion_t
+                            found_tokens_for_this_run = True
+                            
+                        # Try to get model name from the ModelResponse item's output or other attributes
+                        # The model name used for the call is not directly on Usage dataclass
+                        model_from_this_item_output = None
+                        if hasattr(model_response_item, 'output'): # ModelResponse.output is often the raw API response object
+                            output_obj = model_response_item.output
+                            if hasattr(output_obj, 'model') and isinstance(output_obj.model, str):
+                                model_from_this_item_output = output_obj.model
+                            elif isinstance(output_obj, dict) and output_obj.get('model'):
+                                model_from_this_item_output = output_obj.get('model')
+                        
+                        if model_from_this_item_output and isinstance(model_from_this_item_output, str) and \
+                           (actual_model_name_reported == model_to_use or actual_model_name_reported == "Unknown" or actual_model_name_reported != model_from_this_item_output):
+                            actual_model_name_reported = model_from_this_item_output
+                            print(f"DEBUG: [{agent_name_for_log}] Updated actual_model_name_reported to '{actual_model_name_reported}' from ModelResponse item's output.")
+                        
+                        if found_tokens_for_this_run: # If one ModelResponse has usage, assume it's the primary one for this turn
+                            break 
+                    else:
+                        print(f"DEBUG: [{agent_name_for_log}] raw_responses[{i}].usage object missing input_tokens or output_tokens attributes.")
+            if not found_tokens_for_this_run:
+                 print(f"DEBUG: [{agent_name_for_log}] Iterated through raw_responses, but no parsable token usage data found on .usage attributes.")
+        else:
+            print(f"DEBUG: [{agent_name_for_log}] No 'raw_responses' attribute found on RunResult, or it was empty.")
+        
+        # Fallback: Check if RunResult itself has attributes matching the Usage dataclass directly (less likely now)
+        if not found_tokens_for_this_run:
+            if hasattr(run_result, 'input_tokens') and hasattr(run_result, 'output_tokens'):
+                prompt_t = int(getattr(run_result, 'input_tokens', 0))
+                completion_t = int(getattr(run_result, 'output_tokens', 0))
+                print(f"DEBUG: [{agent_name_for_log}] Found tokens on RunResult directly (Usage dataclass attributes): P={prompt_t}, C={completion_t}")
+                if isinstance(prompt_t, int) and isinstance(completion_t, int) and (prompt_t > 0 or completion_t > 0):
+                    total_prompt_tokens += prompt_t
+                    total_completion_tokens += completion_t
+                    found_tokens_for_this_run = True
+                    # Model name attempt from RunResult
+                    model_attr_on_runresult = getattr(run_result, 'model', getattr(run_result, 'model_name', None))
+                    if isinstance(model_attr_on_runresult, str) and (actual_model_name_reported == model_to_use or actual_model_name_reported == "Unknown"):
+                        actual_model_name_reported = model_attr_on_runresult
+                        print(f"DEBUG: [{agent_name_for_log}] Model from RunResult direct attribute: {actual_model_name_reported}")
+            else:
+                print(f"DEBUG: [{agent_name_for_log}] RunResult does not have direct input_tokens/output_tokens attributes.")
 
-
-                if item_model_from_response and (actual_model_name_reported == model_to_use or actual_model_name_reported == "Unknown" or actual_model_name_reported != item_model_from_response):
-                    actual_model_name_reported = item_model_from_response
-                    print(f"DEBUG: [{agent_name_for_log}] Updated actual_model_name_reported to '{actual_model_name_reported}' from item.")
-                
-                if item_usage_data and isinstance(item_usage_data, dict):
-                    prompt_tokens = item_usage_data.get("prompt_tokens", 0)
-                    completion_tokens = item_usage_data.get("completion_tokens", 0)
-                    if isinstance(prompt_tokens, int) and isinstance(completion_tokens, int) and (prompt_tokens > 0 or completion_tokens > 0):
-                        print(f"DEBUG: [{agent_name_for_log}] Accumulating tokens: Prompt={prompt_tokens}, Completion={completion_tokens}")
-                        total_prompt_tokens += prompt_tokens
-                        total_completion_tokens += completion_tokens
+        # Fallback for model name from new_items if not found via raw_responses's model attribute
+        if (actual_model_name_reported == model_to_use or actual_model_name_reported == "Unknown"):
+            if hasattr(run_result, 'new_items') and run_result.new_items:
+                for item in run_result.new_items:
+                    model_from_item_raw = None
+                    if hasattr(item, 'raw_item'):
+                        raw_item_obj = getattr(item, 'raw_item')
+                        if hasattr(raw_item_obj, 'model') and isinstance(getattr(raw_item_obj, 'model'), str):
+                            model_from_item_raw = getattr(raw_item_obj, 'model')
+                        elif isinstance(raw_item_obj, dict): # if raw_item is dict itself
+                            model_from_item_raw = raw_item_obj.get('model')
+                    if model_from_item_raw and isinstance(model_from_item_raw, str):
+                        actual_model_name_reported = model_from_item_raw
+                        print(f"DEBUG: [{agent_name_for_log}] Updated actual_model_name_reported from item.raw_item (fallback) to '{actual_model_name_reported}'")
                         break 
-                    else: print(f"DEBUG: [{agent_name_for_log}] item_usage_data found but tokens are zero, missing, or not integers: {item_usage_data}")
-                if not (total_prompt_tokens > 0 or total_completion_tokens > 0): # check if any tokens were added in this specific run_result
-                    print(f"DEBUG: [{agent_name_for_log}] After iterating new_items, still no token usage found for this agent run.")
-        elif not direct_usage_data: # If no run_result.usage and no new_items
-             print(f"DEBUG: [{agent_name_for_log}] No RunResult.usage, and no new_items in run_result or new_items is empty.")
+        
+        if not found_tokens_for_this_run:
+            print(f"DEBUG: [{agent_name_for_log}] Ultimately, no token usage data was successfully extracted for this agent run.")
             
         return run_result
+
+    # ... (The rest of solve_github_issue_flow, including agent instantiations, workflow steps using run_agent_and_track_usage,
+    #      error handling, summary comment construction, and final token printout remains the same as your last full correct version)
 
     repo_owner = repo_owner_override
     repo_name = repo_name_override
@@ -253,9 +259,9 @@ async def solve_github_issue_flow(
                     issue_details_from_tool = potential_details
             except (json.JSONDecodeError, TypeError):
                 print(f"❌ Error: Could not get structured issue details from triage step. Last agent output: {triage_output_summary}")
-                if show_token_summary:
+                if show_token_summary: 
                     overall_total_tokens_err = total_prompt_tokens + total_completion_tokens
-                    print("\n--- Token Usage Summary (Partial) ---")
+                    print("\n--- Token Usage Summary (Partial) ---") 
                     print(f"Model Used: {actual_model_name_reported}")
                     print(f"Total Prompt Tokens: {total_prompt_tokens}")
                     print(f"Total Completion Tokens: {total_completion_tokens}")
@@ -273,7 +279,7 @@ async def solve_github_issue_flow(
         print("❌ Error: Issue number not found in triaged details.")
         if show_token_summary: 
             overall_total_tokens_err = total_prompt_tokens + total_completion_tokens
-            print("\n--- Token Usage Summary (Partial) ---")
+            print("\n--- Token Usage Summary (Partial) ---") # ... (token summary on error)
             print(f"Model Used: {actual_model_name_reported}")
             print(f"Total Prompt Tokens: {total_prompt_tokens}")
             print(f"Total Completion Tokens: {total_completion_tokens}")
@@ -343,7 +349,7 @@ async def solve_github_issue_flow(
         summary_comment_parts_init.extend(footer_parts_init)
         final_summary_comment_init = "\n".join(summary_comment_parts_init)
         await run_agent_and_track_usage(comment_poster, f"Post the following comment to {issue_url}: \n\n{final_summary_comment_init}")
-        if show_token_summary:
+        if show_token_summary: 
             overall_total_tokens_err = total_prompt_tokens + total_completion_tokens
             print("\n--- Token Usage Summary (Partial) ---")
             print(f"Model Used: {actual_model_name_reported}")
@@ -362,7 +368,7 @@ async def solve_github_issue_flow(
                 original_file_contents[fp] = content_data["content"]
             else: original_file_contents[fp] = None 
         print("\n")
-
+    
     # --- Step 2: Propose Initial File Operations ---
     current_proposed_operations: List[Dict[str, str]] = []
     proposer_input_parts = [
@@ -548,7 +554,7 @@ async def solve_github_issue_flow(
     if show_token_summary:
         overall_total_tokens = total_prompt_tokens + total_completion_tokens
         print("\n--- Token Usage Summary ---")
-        print(f"Model Used: {actual_model_name_reported if actual_model_name_reported and actual_model_name_reported != model_to_use else model_to_use}")
+        print(f"Model Used: {actual_model_name_reported if actual_model_name_reported and actual_model_name_reported != 'Unknown' else model_to_use}")
         print(f"Total Prompt Tokens: {total_prompt_tokens}")
         print(f"Total Completion Tokens: {total_completion_tokens}")
         print(f"Overall Total Tokens: {overall_total_tokens}")
@@ -630,4 +636,3 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
 
     main()
-    
