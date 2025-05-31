@@ -64,7 +64,7 @@ The application is run from the command line, specifying the repository, issue n
 
 ### Command Structure
 ```bash
-python -m src.octoagent.main <repo_name> <issue_number> [--user_id <user_id>] [--target_file <path>] [--max_review_cycles <int>]
+python -m src.octoagent.main <repo_name> <issue_number> [--user_id <user_id>] [--target_file <path>] [--max_review_cycles <int>] [--model <model_name>] [--no_token_usage] [--log_level <LEVEL>]
 ```
 
 ### Arguments
@@ -72,33 +72,51 @@ python -m src.octoagent.main <repo_name> <issue_number> [--user_id <user_id>] [-
 * `issue_number`: The number of the issue you want to solve.
 * `--user_id` (optional): The GitHub username or organization that owns the repository. The provided `GITHUB_TOKEN` must have permissions for this user/organization's repository. **Defaults to `bgreenwell`**.
 * `--target_file`, `-f` (optional): The full path to the file that should be modified. If provided, this will skip the agent-based file identification step.
-* `--max_review_cycles` (optional): The maximum number of review cycles for code proposals. Defaults to 3.
+* `--max_review_cycles` (optional): The maximum number of review cycles for code proposals. **Defaults to 3**.
+* `--model` (optional): The OpenAI model to use for the agents (e.g., "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"). **Defaults to "gpt-4o"**.
+* `--no_token_usage` (optional): If present, hides the summary of token usage. **Token usage is shown by default.**
+* `--log_level` (optional): Set the logging level. Options: DEBUG, INFO, WARNING, ERROR, CRITICAL. **Defaults to WARNING.**
 
 ### Examples
 
 1.  **Run in autonomous mode:**
     This command attempts to solve issue #12 in the `bgreenwell/statlingua` repository, letting the agent identify the correct file to fix.
     ```bash
-    python -m src.octoagent.main statlingua 12
+    python -m src.octoragent.main statlingua 12
     ```
 
 2.  **Run on another user's repository:**
-To target a repository under a different user or organization, use the `--user_id` flag. Note that the `GITHUB_TOKEN` you have set must have access permissions for this repository.
+    To target a repository under a different user or organization, use the `--user_id` flag. Note that the `GITHUB_TOKEN` you have set must have access permissions for this repository.
     ```bash
-    python -m src.octoagent.main some-awesome-repo 42 --user_id another-developer
+    python -m src.octoragent.main some-awesome-repo 42 --user_id another-developer
     ```
     
 3.  **Run with a specific target file to override the agent:**
     If you already know which file needs to be fixed, you can specify it directly to skip the file identification step.
     ```bash
-    python -m src.octoagent.main ramify 15 --target_file ".gitignore"
+    python -m src.octoragent.main ramify 15 --target_file ".gitignore"
     ```
 
-4. **Run with a different number of review cycles:**
-You can control the code revision process by setting the maximum number of review cycles.
-```bash
-python -m src.octoragent.main statlingua 12 --max_review_cycles 1
-```
+4.  **Run with a different number of review cycles:**
+    You can control the code revision process by setting the maximum number of review cycles.
+    ```bash
+    python -m src.octoragent.main statlingua 12 --max_review_cycles 1
+    ```
+
+5.  **Run with a specific model:**
+    ```bash
+    python -m src.octoragent.main statlingua 12 --model gpt-3.5-turbo
+    ```
+
+6.  **Run without showing token usage:**
+    ```bash
+    python -m src.octoragent.main statlingua 12 --no_token_usage
+    ```
+
+7.  **Run with verbose debug logging:**
+    ```bash
+    python -m src.octoragent.main statlingua 12 --log_level DEBUG
+    ```
 
 ## Writing Agent-Friendly Issues
 
@@ -106,7 +124,7 @@ While **OctoAgent** is designed to understand a variety of issue formats, provid
 
 Here is a recommended template for bug reports:
 
-```markdown
+````markdown
 ### Bug Report
 
 **Description**
@@ -125,8 +143,9 @@ A clear and concise description of what you expected to happen.
 If you have a hunch, list any files you suspect might be related to the issue. This is extremely helpful for the `FileIdentifierAgent`.
 - `src/app/module.py`
 - `src/utils/helpers.py`
-```
-For feature requests, please describe the problem you're trying to solve and your proposed solution in as much detail as possible.
+````
+
+For **feature requests**, please describe the problem you're trying to solve and your proposed solution in as much detail as possible.
 
 ## TODO
 

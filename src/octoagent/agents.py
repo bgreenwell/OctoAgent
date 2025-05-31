@@ -1,6 +1,11 @@
 """
 Defines the agent classes used in the OctoAgent workflow.
+
+Each agent is a specialized class inheriting from a reusable base agent,
+with specific instructions and tools tailored to its role (e.g., triaging
+issues, proposing code, reviewing code).
 """
+import logging
 from agents import Agent as BaseAgent, Runner
 from .tools import (
     download_github_issue,
@@ -8,13 +13,14 @@ from .tools import (
     post_comment_to_github,
     list_repository_files,
     commit_files_to_branch,
-    delete_file_from_branch,
-    # get_file_content will no longer be directly used by CodeProposerAgent
+    delete_file_from_branch
+    # get_file_content is used by main.py now, not directly by CodeProposerAgent's tools
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ReusableAgent(BaseAgent):
-    # ... (ReusableAgent definition remains the same) ...
     """
     A reusable base agent class that can be extended for specific use cases.
 
@@ -28,7 +34,8 @@ class ReusableAgent(BaseAgent):
         The system prompt or instructions for the agent.
         Defaults to "You are a helpful assistant.".
     **kwargs : dict
-        Additional keyword arguments to pass to the base `agents.Agent` class.
+        Additional keyword arguments to pass to the base `agents.Agent` class,
+        including `model` if specified.
 
     Attributes
     ----------
@@ -38,6 +45,7 @@ class ReusableAgent(BaseAgent):
     def __init__(self, name: str, instructions: str = "You are a helpful assistant.", **kwargs):
         super().__init__(name=name, instructions=instructions, **kwargs)
         self.runner = Runner()
+        logger.debug(f"ReusableAgent '{name}' initialized with model '{kwargs.get('model', 'default')}'.")
 
     async def run_agent(self, user_input: str, **kwargs):
         """
@@ -79,7 +87,6 @@ class ReusableAgent(BaseAgent):
 
 
 class SpecialistAgent(ReusableAgent):
-    # ... (SpecialistAgent definition remains the same) ...
     """
     An example of a specialized agent that inherits from ReusableAgent.
 
@@ -99,14 +106,17 @@ class SpecialistAgent(ReusableAgent):
 
 
 class IssueTriagerAgent(ReusableAgent):
-    # ... (IssueTriagerAgent definition remains the same) ...
     """An agent that triages GitHub issues."""
     def __init__(self, **kwargs):
-        super().__init__(name="IssueTriager", instructions="Triage GitHub issues using the download_github_issue tool. Provide a detailed summary including title, URL, author, state, labels, comment count, creation/update dates, a concise description of the issue, your analysis of the issue type (e.g., bug, feature, documentation), and a suggested priority (e.g., Low, Medium, High) with a brief justification.", tools=[download_github_issue], **kwargs)
+        super().__init__(
+            name="IssueTriager", 
+            instructions="Triage GitHub issues using the download_github_issue tool. Provide a detailed summary including title, URL, author, state, labels, comment count, creation/update dates, a concise description of the issue, your analysis of the issue type (e.g., bug, feature, documentation), and a suggested priority (e.g., Low, Medium, High) with a brief justification.", 
+            tools=[download_github_issue], 
+            **kwargs
+        )
 
 
 class PlannerAgent(ReusableAgent):
-    # ... (PlannerAgent definition remains the same) ...
     """
     An agent that analyzes a triaged GitHub issue and creates a
     high-level, step-by-step plan to address it.
@@ -170,23 +180,25 @@ class CodeProposerAgent(ReusableAgent):
                 "1. You are given the **entire original content** of that file.\n"
                 "2. You MUST determine where your new code (e.g., a new function, a fix to an existing line) should be placed within that original content.\n"
                 "3. Your output for that file MUST be the **ENTIRE, COMPLETE, MODIFIED content of the file.** This means you include ALL of the original, unchanged code, plus your additions/modifications in the correct places. \n"
-                "   For example, if original content is `def func_a():\n  pass` and you need to add `func_b`, your output for that file should be something like:\n"
-                "   `def func_a():\n  pass\n\ndef func_b():\n  # new code here\n`\n"
+                "   For example, if original content is `def func_a():\\n  pass` and you need to add `func_b`, your output for that file should be something like:\n"
+                "   `def func_a():\\n  pass\\n\\ndef func_b():\\n  # new code here\\n`\n"
                 "   **DO NOT output only the new function or the changed lines. Output the WHOLE file's new content.**\n\n"
                 "**For NEW files** (where 'Original content for `filename.ext`:' indicates it's new or content wasn't available):\n"
                 "- Generate the complete initial content for this new file.\n\n"
-                "**Assumptions:** If the issue or plan is vague, make a reasonable, simple choice for the "
+                "**Assumptions:** If the issue or plan is vague (e.g., 'add a utility function'), make a reasonable, simple choice for the "
                 "implementation and **explicitly state your choice and any assumptions made in a section titled 'Assumptions Made:'** "
                 "before presenting any file operations.\n\n"
                 "**Output Operations (after 'Assumptions Made:' section, if any):**\n"
                 "- **To Modify/Create a File:** State 'Changes for `path/to/file.ext`:' "
                 "followed by the **ENTIRE NEW FILE CONTENT** (as described above) in a single markdown code block "
                 "with the appropriate language identifier.\n"
-                "- **To Delete a File:** State 'Delete file: `path/to/file.ext`'.\n"
+                "- **To Delete a File:** State 'Delete file: `path/to/file.ext`'. "
+                "(Do not provide a code block for deletions).\n"
                 "- **For No Change:** If a file needs no changes, state 'No changes needed for `path/to/file.ext`.'\n\n"
                 "Ensure your response clearly lists all intended operations for all relevant files. "
                 "If revising based on feedback, re-apply the same principles using the original content as your base."
             ),
+            # No 'get_file_content' tool as orchestrator provides content
             **kwargs
         )
 
@@ -201,7 +213,7 @@ class ChangeExplainerAgent(ReusableAgent):
                 "1. The original GitHub issue title and body (for context on the *why*).\n"
                 "2. The overall plan for the issue (for more context on the *why*).\n"
                 "3. The file path that was changed.\n"
-                "4. The original code snippet (or 'This is a new file.' if it was a new file creation).\n"
+                "4. The original code snippet (or 'This is a new file.' if it was a new file creation, or 'Content before deletion was not available or file was new.' if it was a deletion of a possibly new/unfetched file).\n"
                 "5. The new code snippet (or 'This file was deleted.' if it was a deletion).\n"
                 "Your explanation should briefly describe WHAT was changed (e.g., 'Added a new function `foo` to handle X.', "
                 "'Modified the logic in `bar` to correctly process Y.', 'Deleted the unused variable `z`.', 'Created new file `alpha.py` to implement Z functionality.', 'Deleted file `beta.py` as part of refactoring to Z.') "
@@ -214,7 +226,6 @@ class ChangeExplainerAgent(ReusableAgent):
 
 
 class CodeReviewerAgent(ReusableAgent):
-    # ... (CodeReviewerAgent definition: ensure its prompt can handle explanations if provided) ...
     """
     An agent that reviews proposed file operations (creations, modifications, deletions).
     """
@@ -242,7 +253,6 @@ class CodeReviewerAgent(ReusableAgent):
         )
 
 class CodeCommitterAgent(ReusableAgent):
-    # ... (CodeCommitterAgent definition remains the same) ...
     """An agent that commits file changes (creations, updates, deletions) to a branch."""
     def __init__(self, **kwargs):
         super().__init__(
@@ -262,8 +272,8 @@ class CodeCommitterAgent(ReusableAgent):
             **kwargs
         )
 
+
 class BranchCreatorAgent(ReusableAgent):
-    # ... (BranchCreatorAgent definition remains the same) ...
     """An agent that creates a branch for a pull request."""
     def __init__(self, **kwargs):
         super().__init__(
@@ -278,8 +288,8 @@ class BranchCreatorAgent(ReusableAgent):
             **kwargs
         )
 
+
 class CommentPosterAgent(ReusableAgent):
-    # ... (CommentPosterAgent definition remains the same) ...
     """An agent that posts comments to GitHub issues."""
     def __init__(self, **kwargs):
         super().__init__(name="CommentPoster", instructions="Post comments to GitHub issues using the post_comment_to_github tool.", tools=[post_comment_to_github], **kwargs)

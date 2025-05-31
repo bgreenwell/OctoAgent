@@ -11,6 +11,9 @@ import json
 import os
 import requests
 from typing import Any, Dict, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 class GitHubClient:
     """
@@ -43,7 +46,7 @@ class GitHubClient:
         if self.token:
             self.headers["Authorization"] = f"token {self.token}"
         else:
-            print("Warning: GitHubClient initialized without a GITHUB_TOKEN. Authenticated operations will fail.")
+            logger.warning("GitHubClient initialized without a GITHUB_TOKEN. Authenticated operations will fail.")
 
     def _make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """
@@ -69,7 +72,7 @@ class GitHubClient:
             response = requests.request(method, url, headers=self.headers, **kwargs)
             return response
         except requests.exceptions.RequestException as e:
-            print(f"GitHub API RequestException for {method} {url}: {e}")
+            logger.error(f"GitHub API RequestException for {method} {url}: {e}")
             mock_response = requests.Response()
             mock_response.status_code = 503
             mock_response.reason = "Network Error"
@@ -78,34 +81,6 @@ class GitHubClient:
             except: # pylint: disable=bare-except
                 mock_response._content = b'{"error": "Network request to GitHub failed."}' # type: ignore
             return mock_response
-
-    async def delete_file_on_branch(self, owner: str, repo: str, branch_name: str, file_path: str, commit_message: str, sha: str) -> Dict[str, Any]:
-        """
-        Deletes a file from a specific branch.
-        # ... (rest of the docstring)
-        """
-        if not self.token:
-            return {"error": "GitHub token is required to delete files."}
-
-        endpoint = f"/repos/{owner}/{repo}/contents/{file_path}"
-        payload = {
-            "message": commit_message,
-            "sha": sha,
-            "branch": branch_name
-        }
-        print(f"GitHubClient: Deleting file {owner}/{repo}/{file_path} on branch '{branch_name}' (SHA: {sha})")
-        try:
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(None, lambda: self._make_request("DELETE", endpoint, json=payload))
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.HTTPError as e:
-            error_details = {"error": f"HTTPError deleting file: {e.response.status_code} {e.response.reason}", "details_text": e.response.text}
-            try: error_details["details_json"] = e.response.json()
-            except ValueError: pass
-            return error_details
-        except Exception as e:
-            return {"error": f"An unexpected error occurred during file deletion: {str(e)}"}
 
     async def get_default_branch(self, owner: str, repo: str) -> Optional[str]:
         """
@@ -130,98 +105,8 @@ class GitHubClient:
             response.raise_for_status()
             return response.json().get("default_branch")
         except Exception as e:
-            print(f"Error getting default branch for {owner}/{repo}: {e}")
+            logger.error(f"Error getting default branch for {owner}/{repo}: {e}")
             return None
-
-    async def get_file_content_from_repo(self, owner: str, repo: str, file_path: str, branch: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieves the content of a specific file from a repository.
-
-        Parameters
-        ----------
-        owner : str
-            The owner of the repository.
-        repo : str
-            The name of the repository.
-        file_path : str
-            The path to the file within the repository.
-        branch : str
-            The name of the branch.
-
-        Returns
-        -------
-        dict or None
-            A dictionary containing 'content' (decoded string) and 'sha' of the file,
-            or None if the file is not found or an error occurs.
-            Content is None if it's a directory or submodule.
-        """
-        endpoint = f"/repos/{owner}/{repo}/contents/{file_path}?ref={branch}"
-        print(f"GitHubClient: Fetching content for {owner}/{repo}/{file_path} on branch {branch}")
-        try:
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(None, lambda: self._make_request("GET", endpoint))
-            response.raise_for_status() # Will raise HTTPError for 404, etc.
-            
-            response_json = response.json()
-            if isinstance(response_json, list): # API returns a list if path is a directory
-                return {"error": "Path is a directory, not a file.", "status": "is_directory"}
-
-            if response_json.get("type") != "file":
-                return {"error": f"Path is not a file (type: {response_json.get('type')}).", "status": "not_a_file"}
-
-            content_base64 = response_json.get("content")
-            if content_base64:
-                decoded_content = base64.b64decode(content_base64).decode('utf-8')
-                return {
-                    "file_path": file_path,
-                    "content": decoded_content,
-                    "sha": response_json.get("sha"),
-                    "status": "success"
-                }
-            else: # Should not happen for type 'file' but good to check
-                return {"error": "File content is empty or not available.", "status": "empty_content"}
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
-                return {"error": f"File not found: {file_path}", "status": "not_found"}
-            return {"error": f"HTTPError fetching file: {e.response.status_code} {e.response.reason}", "details_text": e.response.text, "status": "http_error"}
-        except Exception as e:
-            return {"error": f"An unexpected error occurred fetching file content: {str(e)}", "status": "unknown_error"}
-
-    async def list_files_in_repo(self, owner: str, repo: str, branch: str = "main") -> Dict[str, Any]:
-        """
-        Lists all files in a repository recursively for a given branch.
-
-        Parameters
-        ----------
-        owner : str
-            The owner of the repository.
-        repo : str
-            The name of the repository.
-        branch : str
-            The name of the branch to list files from.
-
-        Returns
-        -------
-        dict
-            A dictionary containing a list of file paths, or an error payload.
-        """
-        latest_sha = await self.get_latest_commit_sha(owner, repo, branch)
-        if not latest_sha:
-            return {"error": f"Could not get latest commit SHA for branch '{branch}'."}
-
-        endpoint = f"/repos/{owner}/{repo}/git/trees/{latest_sha}?recursive=true"
-        try:
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(None, lambda: self._make_request("GET", endpoint))
-            response.raise_for_status()
-            response_json = response.json()
-            # Extract file paths from the tree
-            files = [item['path'] for item in response_json.get('tree', []) if item.get('type') == 'blob']
-            return {"files": files}
-        except requests.exceptions.HTTPError as e:
-            return {"error": f"HTTPError: {e.response.status_code} {e.response.reason}", "details_text": e.response.text}
-        except Exception as e:
-            return {"error": f"Failed to list files for {owner}/{repo} on branch {branch}: {str(e)}"}
 
     async def get_issue_details(self, owner: str, repo: str, issue_number: int) -> Dict[str, Any]:
         """
@@ -248,14 +133,16 @@ class GitHubClient:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTPError getting issue details for {owner}/{repo}#{issue_number}: {e.response.status_code} {e.response.reason} - {e.response.text[:100]}")
             error_payload = {"error": f"HTTPError: {e.response.status_code} {e.response.reason}", "details_text": e.response.text}
             try: error_payload["details_json"] = e.response.json()
             except ValueError: pass
             return error_payload
         except Exception as e:
+            logger.error(f"Failed to get issue details for {owner}/{repo}#{issue_number}: {str(e)}")
             return {"error": f"Failed to get issue details for {owner}/{repo}#{issue_number}: {str(e)}"}
 
-    async def get_latest_commit_sha(self, owner: str, repo: str, branch: str = "main") -> Optional[str]:
+    async def get_latest_commit_sha(self, owner: str, repo: str, branch: str) -> Optional[str]:
         """
         Gets the SHA of the latest commit on a specific branch.
 
@@ -280,36 +167,20 @@ class GitHubClient:
             response.raise_for_status()
             return response.json().get("commit", {}).get("sha")
         except Exception as e:
-            print(f"Error getting latest commit SHA for {owner}/{repo}/{branch}: {e}")
+            logger.error(f"Error getting latest commit SHA for {owner}/{repo}/{branch}: {e}")
             return None
 
-    async def create_branch(self, owner: str, repo: str, new_branch_name: str, base_branch_name: str = "main") -> Dict[str, Any]:
+    async def create_branch(self, owner: str, repo: str, new_branch_name: str, base_branch_name: str) -> Dict[str, Any]:
         """
         Creates a new branch in a repository from a base branch.
-
-        If the branch already exists, it returns a message indicating so.
-
-        Parameters
-        ----------
-        owner : str
-            The owner of the repository.
-        repo : str
-            The name of the repository.
-        new_branch_name : str
-            The name of the new branch to create.
-        base_branch_name : str
-            The name of the branch from which to create the new one.
-
-        Returns
-        -------
-        dict
-            A dictionary containing the API response or an error payload.
         """
         if not self.token:
+            logger.error("GitHub token is required to create a branch.")
             return {"error": "GitHub token is required to create a branch."}
 
         latest_sha = await self.get_latest_commit_sha(owner, repo, base_branch_name)
         if not latest_sha:
+            logger.error(f"Could not get SHA for base branch '{base_branch_name}' in {owner}/{repo}.")
             return {"error": f"Could not get SHA for base branch '{base_branch_name}' in {owner}/{repo}."}
 
         endpoint = f"/repos/{owner}/{repo}/git/refs"
@@ -325,6 +196,7 @@ class GitHubClient:
             response_data = {"text_response": response.text}
 
         if response.status_code == 201:
+            logger.info(f"Branch '{new_branch_name}' created successfully in {owner}/{repo}.")
             return response_data
         elif response.status_code == 422:
             message_from_response = response_data.get("message", "") if isinstance(response_data, dict) else response.text
@@ -333,9 +205,10 @@ class GitHubClient:
             if "Reference already exists" in message_from_response or \
                any(err.get("code") == "already_exists" for err in errors_from_response):
                 msg = f"Branch '{new_branch_name}' already exists in {owner}/{repo}."
-                print(f"INFO (agents.py): {msg}")
+                logger.info(msg)
                 return {"message": msg, "ref": f"refs/heads/{new_branch_name}", "object": {"sha": latest_sha}, "already_exists": True}
             else:
+                logger.error(f"422 Unprocessable Entity creating branch {new_branch_name}: {message_from_response}")
                 return {"error": f"422 Unprocessable Entity: {message_from_response}",
                         "details_json": response_data if isinstance(response_data, dict) else {"text_response": response.text}}
         else:
@@ -343,34 +216,20 @@ class GitHubClient:
                 response.raise_for_status()
                 return response_data
             except requests.exceptions.HTTPError as e_http:
+                 logger.error(f"HTTPError creating branch {new_branch_name}: {e_http.response.status_code} {e_http.response.reason} - {e_http.response.text[:100]}")
                  error_payload = {"error": f"HTTPError: {e_http.response.status_code} {e_http.response.reason}", "details_text": e_http.response.text}
                  if isinstance(response_data, dict): error_payload["details_json"] = response_data
                  return error_payload
             except Exception as e_generic:
+                 logger.error(f"Unexpected error after branch creation attempt for {new_branch_name}: {e_generic}")
                  return {"error": f"An unexpected error occurred after branch creation attempt: {str(e_generic)}"}
 
     async def add_comment_to_issue(self, owner: str, repo: str, issue_number: int, comment_body: str) -> Dict[str, Any]:
         """
         Adds a comment to a GitHub issue.
-
-        Parameters
-        ----------
-        owner : str
-            The owner of the repository.
-        repo : str
-            The name of the repository.
-        issue_number : int
-            The number of the issue to comment on.
-        comment_body : str
-            The content of the comment in markdown format.
-
-        Returns
-        -------
-        dict
-            A dictionary containing the API response for the new comment, or
-            an error payload.
         """
         if not self.token:
+            logger.error("GitHub token is required to post a comment.")
             return {"error": "GitHub token is required to post a comment."}
         endpoint = f"/repos/{owner}/{repo}/issues/{issue_number}/comments"
         payload = {"body": comment_body}
@@ -378,36 +237,22 @@ class GitHubClient:
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(None, lambda: self._make_request("POST", endpoint, json=payload))
             response.raise_for_status()
+            logger.info(f"Comment posted successfully to {owner}/{repo}#{issue_number}.")
             return response.json()
         except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTPError posting comment to {owner}/{repo}#{issue_number}: {e.response.status_code} {e.response.reason} - {e.response.text[:100]}")
             error_payload = {"error": f"HTTPError: {e.response.status_code} {e.response.reason}", "details_text": e.response.text}
             try: error_payload["details_json"] = e.response.json()
             except ValueError: pass
             return error_payload
         except Exception as e:
+            logger.error(f"Failed to post comment to {owner}/{repo}#{issue_number}: {str(e)}")
             return {"error": f"Failed to post comment: {str(e)}"}
 
     async def get_file_sha(self, owner: str, repo: str, file_path: str, branch_name: str) -> Optional[str]:
         """
         Gets the SHA of an existing file on a branch.
-
-        Parameters
-        ----------
-        owner : str
-            The owner of the repository.
-        repo : str
-            The name of the repository.
-        file_path : str
-            The path to the file within the repository.
-        branch_name : str
-            The name of the branch where the file exists.
-
-        Returns
-        -------
-        str or None
-            The SHA of the file if it exists, otherwise None.
         """
-        """Gets the SHA of an existing file on a branch, returns None if not found."""
         endpoint = f"/repos/{owner}/{repo}/contents/{file_path}?ref={branch_name}"
         try:
             loop = asyncio.get_running_loop()
@@ -415,44 +260,65 @@ class GitHubClient:
             if response.status_code == 200:
                 return response.json().get("sha")
             elif response.status_code == 404:
-                return None # File does not exist
+                logger.debug(f"File {file_path} not found on branch {branch_name} in {owner}/{repo} during SHA lookup.")
+                return None 
             response.raise_for_status()
-            return None
+            return None # Should not be reached if raise_for_status works
         except Exception as e:
-            print(f"Error getting file SHA for {owner}/{repo}/{file_path} on branch {branch_name}: {e}")
+            logger.error(f"Error getting file SHA for {owner}/{repo}/{file_path} on branch {branch_name}: {e}")
             return None
+
+    async def get_file_content_from_repo(self, owner: str, repo: str, file_path: str, branch: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves the content of a specific file from a repository.
+        """
+        endpoint = f"/repos/{owner}/{repo}/contents/{file_path}?ref={branch}"
+        logger.debug(f"GitHubClient: Fetching content for {owner}/{repo}/{file_path} on branch {branch}")
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda: self._make_request("GET", endpoint))
+            response.raise_for_status() 
+            
+            response_json = response.json()
+            if isinstance(response_json, list): 
+                logger.warning(f"Path '{file_path}' on {owner}/{repo} is a directory, not a file.")
+                return {"error": "Path is a directory, not a file.", "status": "is_directory"}
+
+            if response_json.get("type") != "file":
+                logger.warning(f"Path '{file_path}' on {owner}/{repo} is not a file (type: {response_json.get('type')}).")
+                return {"error": f"Path is not a file (type: {response_json.get('type')}).", "status": "not_a_file"}
+
+            content_base64 = response_json.get("content")
+            if content_base64:
+                decoded_content = base64.b64decode(content_base64).decode('utf-8')
+                return {
+                    "file_path": file_path,
+                    "content": decoded_content,
+                    "sha": response_json.get("sha"),
+                    "status": "success"
+                }
+            else: 
+                logger.warning(f"File content for '{file_path}' on {owner}/{repo} is empty or not available.")
+                return {"error": "File content is empty or not available.", "status": "empty_content", "sha": response_json.get("sha")}
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTPError fetching file {file_path}: {e.response.status_code} {e.response.reason} - {e.response.text[:100]}")
+            if e.response.status_code == 404:
+                return {"error": f"File not found: {file_path}", "status": "not_found"}
+            return {"error": f"HTTPError fetching file: {e.response.status_code} {e.response.reason}", "details_text": e.response.text, "status": "http_error"}
+        except Exception as e:
+            logger.error(f"Unexpected error fetching content for {file_path}: {e}")
+            return {"error": f"Unexpected error fetching file content: {str(e)}", "status": "unknown_error"}
+
 
     async def create_commit_on_branch(self, owner: str, repo: str, branch_name: str, commit_message: str, file_path: str, file_content: str) -> Dict[str, Any]:
         """
         Creates or updates a file in a branch and commits it.
-
-        This method uses the GitHub API endpoint:
-        PUT /repos/{owner}/{repo}/contents/{path}
-
-        Parameters
-        ----------
-        owner : str
-            The owner of the repository.
-        repo : str
-            The name of the repository.
-        branch_name : str
-            The name of the branch to commit to.
-        commit_message : str
-            The commit message.
-        file_path : str
-            The path of the file to create or update.
-        file_content : str
-            The new content of the file.
-
-        Returns
-        -------
-        dict
-            A dictionary containing the commit details, or an error payload.
         """
         if not self.token:
+            logger.error("GitHub token is required to commit files.")
             return {"error": "GitHub token is required to commit files."}
 
-        print(f"GitHubClient: Committing to {owner}/{repo} on branch '{branch_name}', file '{file_path}'")
+        logger.info(f"GitHubClient: Committing to {owner}/{repo} on branch '{branch_name}', file '{file_path}'")
 
         endpoint = f"/repos/{owner}/{repo}/contents/{file_path}"
 
@@ -460,6 +326,7 @@ class GitHubClient:
             content_bytes = file_content.encode('utf-8')
             encoded_content = base64.b64encode(content_bytes).decode('utf-8')
         except Exception as e:
+            logger.error(f"Failed to encode file content for {file_path}: {e}")
             return {"error": f"Failed to encode file content: {str(e)}"}
 
         payload: Dict[str, Any] = {
@@ -471,9 +338,9 @@ class GitHubClient:
         existing_file_sha = await self.get_file_sha(owner, repo, file_path, branch_name)
         if existing_file_sha:
             payload["sha"] = existing_file_sha
-            print(f"  Updating existing file '{file_path}' (SHA: {existing_file_sha}).")
+            logger.debug(f"  Updating existing file '{file_path}' (SHA: {existing_file_sha}).")
         else:
-            print(f"  Creating new file '{file_path}'.")
+            logger.debug(f"  Creating new file '{file_path}'.")
 
         try:
             loop = asyncio.get_running_loop()
@@ -483,7 +350,7 @@ class GitHubClient:
             response_json = response.json()
             commit_details = response_json.get("commit", {})
             content_details = response_json.get("content", {})
-
+            logger.info(f"File '{file_path}' committed successfully to {branch_name}. SHA: {commit_details.get('sha')}")
             return {
                 "message": "File committed successfully.",
                 "commit_sha": commit_details.get("sha"),
@@ -495,9 +362,68 @@ class GitHubClient:
                 "details": response_json
             }
         except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTPError committing file {file_path}: {e.response.status_code} {e.response.reason} - {e.response.text[:100]}")
             error_details = {"error": f"HTTPError: {e.response.status_code} {e.response.reason}", "details_text": e.response.text}
             try: error_details["details_json"] = e.response.json()
             except ValueError: pass
             return error_details
         except Exception as e:
+            logger.error(f"An unexpected error occurred during commit of {file_path}: {str(e)}")
             return {"error": f"An unexpected error occurred during commit: {str(e)}"}
+
+    async def delete_file_on_branch(self, owner: str, repo: str, branch_name: str, file_path: str, commit_message: str, sha: str) -> Dict[str, Any]:
+        """
+        Deletes a file from a specific branch.
+        """
+        if not self.token:
+            logger.error("GitHub token is required to delete files.")
+            return {"error": "GitHub token is required to delete files."}
+
+        endpoint = f"/repos/{owner}/{repo}/contents/{file_path}"
+        payload = {
+            "message": commit_message,
+            "sha": sha,
+            "branch": branch_name
+        }
+        logger.info(f"GitHubClient: Deleting file {owner}/{repo}/{file_path} on branch '{branch_name}' (SHA: {sha})")
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda: self._make_request("DELETE", endpoint, json=payload))
+            response.raise_for_status()
+            logger.info(f"File '{file_path}' deleted successfully from {branch_name}.")
+            return response.json() 
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTPError deleting file {file_path}: {e.response.status_code} {e.response.reason} - {e.response.text[:100]}")
+            error_details = {"error": f"HTTPError deleting file: {e.response.status_code} {e.response.reason}", "details_text": e.response.text}
+            try: error_details["details_json"] = e.response.json()
+            except ValueError: pass
+            return error_details
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during file deletion for {file_path}: {str(e)}")
+            return {"error": f"An unexpected error occurred during file deletion: {str(e)}"}
+
+    async def list_files_in_repo(self, owner: str, repo: str, branch: str) -> Dict[str, Any]:
+        """
+        Lists all files in a repository recursively for a given branch.
+        """
+        latest_sha = await self.get_latest_commit_sha(owner, repo, branch)
+        if not latest_sha:
+            logger.error(f"Could not get latest commit SHA for branch '{branch}' in {owner}/{repo} to list files.")
+            return {"error": f"Could not get latest commit SHA for branch '{branch}'."}
+
+        endpoint = f"/repos/{owner}/{repo}/git/trees/{latest_sha}?recursive=true"
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda: self._make_request("GET", endpoint))
+            response.raise_for_status()
+            response_json = response.json()
+            files = [item['path'] for item in response_json.get('tree', []) if item.get('type') == 'blob']
+            logger.debug(f"Found {len(files)} files in {owner}/{repo} on branch {branch}.")
+            return {"files": files}
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTPError listing files for {owner}/{repo} on branch {branch}: {e.response.status_code} {e.response.reason} - {e.response.text[:100]}")
+            return {"error": f"HTTPError: {e.response.status_code} {e.response.reason}", "details_text": e.response.text}
+        except Exception as e:
+            logger.error(f"Failed to list files for {owner}/{repo} on branch {branch}: {str(e)}")
+            return {"error": f"Failed to list files for {owner}/{repo} on branch {branch}: {str(e)}"}
+    
