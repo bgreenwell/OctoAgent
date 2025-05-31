@@ -1,9 +1,5 @@
 """
 Defines the agent classes used in the OctoAgent workflow.
-
-Each agent is a specialized class inheriting from a reusable base agent,
-with specific instructions and tools tailored to its role (e.g., triaging
-issues, proposing code, reviewing code).
 """
 from agents import Agent as BaseAgent, Runner
 from .tools import (
@@ -13,11 +9,12 @@ from .tools import (
     list_repository_files,
     commit_files_to_branch,
     delete_file_from_branch,
-    get_file_content # Crucial for CodeProposerAgent
+    # get_file_content will no longer be directly used by CodeProposerAgent
 )
 
 
 class ReusableAgent(BaseAgent):
+    # ... (ReusableAgent definition remains the same) ...
     """
     A reusable base agent class that can be extended for specific use cases.
 
@@ -82,6 +79,7 @@ class ReusableAgent(BaseAgent):
 
 
 class SpecialistAgent(ReusableAgent):
+    # ... (SpecialistAgent definition remains the same) ...
     """
     An example of a specialized agent that inherits from ReusableAgent.
 
@@ -101,12 +99,14 @@ class SpecialistAgent(ReusableAgent):
 
 
 class IssueTriagerAgent(ReusableAgent):
+    # ... (IssueTriagerAgent definition remains the same) ...
     """An agent that triages GitHub issues."""
     def __init__(self, **kwargs):
         super().__init__(name="IssueTriager", instructions="Triage GitHub issues using the download_github_issue tool. Provide a detailed summary including title, URL, author, state, labels, comment count, creation/update dates, a concise description of the issue, your analysis of the issue type (e.g., bug, feature, documentation), and a suggested priority (e.g., Low, Medium, High) with a brief justification.", tools=[download_github_issue], **kwargs)
 
 
 class PlannerAgent(ReusableAgent):
+    # ... (PlannerAgent definition remains the same) ...
     """
     An agent that analyzes a triaged GitHub issue and creates a
     high-level, step-by-step plan to address it.
@@ -138,74 +138,87 @@ class FileIdentifierAgent(ReusableAgent):
                 "You are an expert software architect. Your task is to analyze a GitHub issue and the overall plan, "
                 "then identify all relevant file paths for the required operations. "
                 "Consider creations, modifications, and especially renames or deletions implied by the issue or plan.\n"
+                "VERY IMPORTANT: Your output MUST be ONLY a list of file paths, each on a new line. Do NOT include any other text, descriptions, or bullet points. "
+                "For example, if 'file1.py' and 'src/file2.py' are identified, your output should be:\n"
+                "file1.py\n"
+                "src/file2.py\n\n"
                 "- For modifications to existing files, list their current paths.\n"
-                "- For new files to be created (e.g., for a new feature), suggest a suitable new file path.\n"
+                "- For new files to be created (e.g., for a new feature suggested in the plan, like test files), suggest a suitable new file path.\n"
                 "- If a file is to be renamed or moved (e.g., from `old/path.py` to `new/path.py`), "
                 "list BOTH the old path (as a source for deletion/reference) AND the new path (as a target for new content).\n"
                 "- If a directory rename (e.g. `old_dir/` to `new_dir/`) affects files within, list relevant files using their "
                 "OLD paths (e.g., `old_dir/file.py`) if they are sources for deletion/move, and their NEW paths "
                 "(e.g., `new_dir/file.py`) if they are targets for new/modified content.\n"
-                "Output ONLY the full file paths, each on a new line. If no specific files are involved, output 'None'."
+                "If no specific files are involved, output the exact string 'None'."
             ),
             tools=[list_repository_files],
             **kwargs
         )
 
-
 class CodeProposerAgent(ReusableAgent):
-    """An agent that proposes code solutions for GitHub issues across multiple files,
-    intelligently merging changes with existing content and explaining assumptions."""
+    """An agent that proposes code solutions, expecting original content for modifications."""
     def __init__(self, **kwargs):
         super().__init__(
             name="CodeProposer",
             instructions=(
-                "You are an expert software developer. Your task is to propose all necessary file operations "
-                "(creations, modifications, deletions) based on GitHub issue details, an overall plan, "
-                "and a list of relevant file paths.\n\n"
+                "You are an expert software developer. You will be given GitHub issue details, an overall plan, "
+                "a list of relevant file paths, and for each file path to be modified, its original content (or 'None' if it's a new file).\n"
+                "Your task is to propose all necessary file operations (creations, modifications, deletions).\n\n"
                 "**Core Task & Output Format:**\n"
-                "For each file identified as relevant:\n"
-                "1.  **Analyze Intent:** Determine if the goal is to add new functionality, modify existing "
-                "functionality, create a new file, or delete an old file (e.g., for a rename).\n"
-                "2.  **Fetch Existing Content (for modifications/additions):** If modifying or adding to an EXISTING file, "
-                "you MUST first use the `get_file_content` tool to fetch its current content. If the tool indicates the file "
-                "does not exist, treat it as a new file creation.\n"
-                "3.  **Integrate Changes Carefully:**\n"
-                "    * **Additive Changes:** If the issue/plan asks to 'add' new functionality (e.g., a new function or class to an existing file), "
-                "your primary goal is to introduce this new code while **preserving all existing, unrelated code and structures in the file.** "
-                "Do not remove or refactor existing code unless explicitly requested by the issue or plan. Find an appropriate logical place for the new code.\n"
-                "    * **Modifications to Existing Code:** When modifying existing code, integrate your changes precisely into the fetched content, "
-                "preserving unchanged parts.\n"
-                "4.  **State Assumptions:** If the issue or plan is vague (e.g., 'add a utility function' without full specs), "
-                "make a reasonable, simple choice for the implementation. **Before any file operations, include a section titled 'Assumptions Made:' "
-                "listing choices you made (e.g., 'Assumed new math operator should be exponentiation.')**\n"
-                "5.  **Output Operations Clearly (after stating assumptions, if any):**\n"
+                "For each file path provided in 'Relevant File Paths Identified':\n"
+                "1.  **Analyze Intent & Original Content:** Determine if the goal is to add new functionality, "
+                "modify existing functionality, create a new file, or delete an old file (e.g., for a rename). "
+                "Refer to the provided original content for existing files.\n"
+                "2.  **Integrate Changes Carefully:**\n"
+                "    * **Additive Changes:** If the issue/plan asks to 'add' new functionality to an existing file, "
+                "your primary goal is to introduce this new code into the provided original content while "
+                "**preserving all existing, unrelated code and structures.** "
+                "Do not remove or refactor existing code unless explicitly requested.\n"
+                "    * **Modifications to Existing Code:** When modifying existing code, integrate your changes precisely "
+                "into the provided original content, preserving unchanged parts.\n"
+                "3.  **State Assumptions:** If the issue or plan is vague, make a reasonable, simple choice for the "
+                "implementation and **explicitly state your choice and any assumptions made in a section titled 'Assumptions Made:'** "
+                "before presenting file operations.\n"
+                "4.  **Output Operations Clearly (after stating assumptions, if any):**\n"
                 "    * **To Modify/Create a File:** State 'Changes for `path/to/file.ext`:' "
                 "followed by the **ENTIRE new file content** in a single markdown code block "
-                "with the appropriate language identifier. For example:\n"
-                "        Changes for `calculator.py`:\n"
-                "        ```python\n"
-                "        # original content of calculator.py (if any)\n"
-                "        # ...\n"
-                "        # your new or modified function here, integrated correctly\n"
-                "        # ...\n"
-                "        # rest of original content (if any)\n"
-                "        ```\n"
+                "with the appropriate language identifier.\n"
                 "    * **To Delete a File:** State 'Delete file: `path/to/file.ext`'. "
                 "(Do not provide a code block for deletions).\n"
-                "    * **For No Change:** If a file from the identified list needs no changes, "
-                "state 'No changes needed for `path/to/file.ext`.'\n"
-                "6.  **Self-Critique (Briefly, before finalizing output):** Mentally review: Does your proposal fully address "
-                "the specific requirements for each file? Is existing unrelated code correctly preserved for additive changes? "
-                "Are all necessary operations included?\n\n"
-                "Ensure your response clearly lists all intended operations. If revising based on feedback, "
-                "address the feedback specifically for the indicated files/operations, remembering to fetch existing content if modifying."
+                "    * **For No Change:** If a file needs no changes, state 'No changes needed for `path/to/file.ext`.'\n"
+                "Ensure your response lists all intended operations. If revising based on feedback, "
+                "address the feedback specifically for the indicated files/operations, using the initially provided original content as your base for modifications."
             ),
-            tools=[get_file_content],
+            # No 'get_file_content' tool needed anymore, orchestrator will provide content
+            **kwargs
+        )
+
+
+class ChangeExplainerAgent(ReusableAgent):
+    """An agent that explains code changes."""
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="ChangeExplainerAgent",
+            instructions=(
+                "You are a technical writer AI. Your task is to explain a code change clearly and concisely for a GitHub comment or Pull Request description. "
+                "You will be given:\n"
+                "1. The original GitHub issue title and body (for context on the *why*).\n"
+                "2. The overall plan for the issue (for more context on the *why*).\n"
+                "3. The file path that was changed.\n"
+                "4. The original code snippet (or 'This is a new file.' if it was a new file creation).\n"
+                "5. The new code snippet (or 'This file was deleted.' if it was a deletion).\n"
+                "Your explanation should briefly describe WHAT was changed (e.g., 'Added a new function `foo` to handle X.', "
+                "'Modified the logic in `bar` to correctly process Y.', 'Deleted the unused variable `z`.', 'Created new file `alpha.py` to implement Z functionality.', 'Deleted file `beta.py` as part of refactoring to Z.') "
+                "and WHY this change was made, linking it back to the issue requirements or the overall plan. "
+                "Focus on the functional impact and intent of the change. Keep the explanation for this single file/operation concise (1-3 sentences). "
+                "Output only the explanation text for this specific change."
+            ),
             **kwargs
         )
 
 
 class CodeReviewerAgent(ReusableAgent):
+    # ... (CodeReviewerAgent definition: ensure its prompt can handle explanations if provided) ...
     """
     An agent that reviews proposed file operations (creations, modifications, deletions).
     """
@@ -215,7 +228,7 @@ class CodeReviewerAgent(ReusableAgent):
             instructions=(
                 f"You are a meticulous code reviewer specializing in {review_aspect}. "
                 "You will be given GitHub issue details, an overall plan, and a list of proposed file operations "
-                "(creations/modifications with code, or deletions). Also, the proposer may have stated some assumptions made. "
+                "(creations/modifications with code, or deletions). The proposer may have stated some assumptions. "
                 "Provide a concise review for EACH proposed operation. Consider the assumptions and focus on: "
                 f"- {review_aspect.capitalize()} for any code changes.\n"
                 "- Correctness of deletions or renames in context of the issue and plan.\n"
@@ -232,8 +245,8 @@ class CodeReviewerAgent(ReusableAgent):
             **kwargs
         )
 
-
 class CodeCommitterAgent(ReusableAgent):
+    # ... (CodeCommitterAgent definition remains the same) ...
     """An agent that commits file changes (creations, updates, deletions) to a branch."""
     def __init__(self, **kwargs):
         super().__init__(
@@ -253,8 +266,8 @@ class CodeCommitterAgent(ReusableAgent):
             **kwargs
         )
 
-
 class BranchCreatorAgent(ReusableAgent):
+    # ... (BranchCreatorAgent definition remains the same) ...
     """An agent that creates a branch for a pull request."""
     def __init__(self, **kwargs):
         super().__init__(
@@ -269,8 +282,8 @@ class BranchCreatorAgent(ReusableAgent):
             **kwargs
         )
 
-
 class CommentPosterAgent(ReusableAgent):
+    # ... (CommentPosterAgent definition remains the same) ...
     """An agent that posts comments to GitHub issues."""
     def __init__(self, **kwargs):
         super().__init__(name="CommentPoster", instructions="Post comments to GitHub issues using the post_comment_to_github tool.", tools=[post_comment_to_github], **kwargs)

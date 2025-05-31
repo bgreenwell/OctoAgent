@@ -16,6 +16,7 @@ from .agents import (
     IssueTriagerAgent,
     FileIdentifierAgent,
     PlannerAgent,
+    ChangeExplainerAgent
 )
 from .github_client import GitHubClient
 from .tools import extract_code_from_markdown, parse_github_issue_url
@@ -26,7 +27,7 @@ def parse_file_operations(markdown_text: Optional[str]) -> List[Dict[str, str]]:
     Parses the CodeProposerAgent's output for multiple file operations.
 
     Expected formats:
-    Changes for `path/to/file1.py`:
+    Changes for `path/to/file1.py`: or ### Changes for `path/to/file1.py`:
     (optional intermediary text)
     ```python
     # code for file1
@@ -44,7 +45,7 @@ def parse_file_operations(markdown_text: Optional[str]) -> List[Dict[str, str]]:
         return []
 
     operations = []
-    # Regex for modifications/creations - updated to allow text between header and code block
+    # Regex for modifications/creations - updated to allow "### " prefix and intermediary text
     modify_pattern = re.compile(
         r"(?:### )?Changes for `([^`]+?\.[\w./-]+)`:.*?\s*```(?:[a-zA-Z0-9\+\-\#\.]*?)?\s*\n(.*?)\n```",
         re.DOTALL | re.MULTILINE
@@ -101,7 +102,7 @@ async def solve_github_issue_flow(
 ):
     """
     Orchestrates the end-to-end flow of agents to solve a GitHub issue.
-    Now handles multiple file identification, proposal, review, and commit.
+    Includes fetching original file content for diffing and explaining changes.
 
     Parameters
     ----------
@@ -144,6 +145,7 @@ async def solve_github_issue_flow(
     planner = PlannerAgent()
     file_identifier = FileIdentifierAgent()
     code_proposer = CodeProposerAgent()
+    change_explainer = ChangeExplainerAgent()
     technical_reviewer = CodeReviewerAgent(review_aspect="technical correctness and efficiency")
     style_reviewer = CodeReviewerAgent(review_aspect="code style and readability")
     branch_creator = BranchCreatorAgent()
@@ -195,10 +197,10 @@ async def solve_github_issue_flow(
     print(f"Generated Plan:\n{generated_plan}\n")
 
     # --- Step 1.5: Identify Target Files or Use Override ---
-    identified_file_paths: List[str] = []
+    identified_file_paths_raw: List[str] = []
     if target_file_override:
-        identified_file_paths = [f.strip() for f in target_file_override.split(',') if f.strip()]
-        print(f"\n✅ User-specified target file(s): {', '.join(identified_file_paths)}. Skipping file identification step.\n")
+        identified_file_paths_raw = [f.strip() for f in target_file_override.split(',') if f.strip()]
+        print(f"\n✅ User-specified target file(s): {', '.join(identified_file_paths_raw)}. Skipping file identification step.\n")
     else:
         print(f"\n📑 Step 1.5: Identifying Target Files for issue #{issue_number}...")
         identifier_input = (
@@ -211,51 +213,104 @@ async def solve_github_issue_flow(
             f"Overall Plan: {generated_plan}\n"
         )
         identifier_run = await runner.run(file_identifier, input=identifier_input)
-        file_output = identifier_run.final_output.strip()
-        if file_output.lower() != 'none':
-            identified_file_paths = [path.strip() for path in file_output.split('\n') if path.strip()]
-        print(f"File Identifier Agent identified target file(s): {', '.join(identified_file_paths) if identified_file_paths else 'None'}\n")
+        file_output_raw_agent = identifier_run.final_output.strip()
+        print(f"DEBUG: File Identifier Agent Raw Output:\n---\n{file_output_raw_agent}\n---")
+        
+        if file_output_raw_agent.lower() != 'none':
+            # Try to extract file paths more robustly
+            path_candidates = re.findall(r"`([^`]+\.[\w.-]+)`|([\w./-]+\.[\w.-]+)", file_output_raw_agent)
+            temp_paths = []
+            for backticked_path, plain_path in path_candidates:
+                path = backticked_path if backticked_path else plain_path
+                if path and path.strip():
+                    temp_paths.append(path.strip())
+            
+            if not temp_paths and file_output_raw_agent: # Fallback if regex is too strict
+                 potential_paths = [line.strip() for line in file_output_raw_agent.split('\n') if '.' in line.strip() and not line.strip().startswith(('-', '*'))]
+                 for p_path in potential_paths:
+                     cleaned_path = re.sub(r"^- \*\*(?:Current Path|Suggested New Path for .*?):\*\* `(.*?)`$", r"\1", p_path.strip())
+                     cleaned_path = re.sub(r"^- (?:Current Path|Suggested New Path for .*?): `(.*?)`$", r"\1", cleaned_path.strip())
+                     cleaned_path = cleaned_path.strip().replace('`', '') # Remove any remaining backticks
+                     if '.' in cleaned_path and not any(c in cleaned_path for c in [' ', '(', ')', ':']) and '/' in cleaned_path or '.' in cleaned_path.split('/')[-1]:
+                        temp_paths.append(cleaned_path)
 
-    if not identified_file_paths:
-        print(f"ℹ️ No target files identified or specified by user. Assuming issue does not require code changes or cannot be addressed by file modification.")
+            if temp_paths:
+                identified_file_paths_raw = sorted(list(set(temp_paths)))
+        
+        print(f"File Identifier Agent identified target file(s) (parsed): {', '.join(identified_file_paths_raw) if identified_file_paths_raw else 'None'}\n")
+
+    if not identified_file_paths_raw:
+        print(f"ℹ️ No target files identified or specified by user. Cannot proceed with code proposals.")
+        summary_comment_parts = [
+            f"🤖 **OctoAgent Report** for Issue #{issue_number}: {issue_title}",
+            f"\n**Triage Summary:**\n{triage_output_summary}",
+            f"\n**Generated Plan:**\n{generated_plan}",
+            "\n**File Identification:**\nNo files were identified for modification by the agent, and no target file was specified by the user. Unable to proceed with code changes.",
+            "\n---\n*This comment was automatically generated by OctoAgent, an experimental AI-powered issue-solving assistant.*"
+        ]
+        final_summary_comment = "\n".join(summary_comment_parts)
+        await runner.run(comment_poster, input=f"Post the following comment to {issue_url}: \n\n{final_summary_comment}")
+        return
+
+    # --- Pre-fetch original content for identified files ---
+    original_file_contents: Dict[str, Optional[str]] = {}
+    if identified_file_paths_raw:
+        print(f"\nℹ️ Fetching original content for identified files: {', '.join(identified_file_paths_raw)}...")
+        for fp in identified_file_paths_raw:
+            content_data = await github_client.get_file_content_from_repo(repo_owner, repo_name, fp, default_branch_name)
+            if content_data and content_data.get("status") == "success":
+                original_file_contents[fp] = content_data["content"]
+                print(f"  Successfully fetched content for {fp}")
+            else:
+                original_file_contents[fp] = None
+                status_msg = content_data.get('status', 'unknown') if content_data else 'no_response'
+                error_msg = content_data.get('error_message', content_data.get('error', 'Unknown reason')) if content_data else 'No data'
+                print(f"  ⚠️ Could not fetch content for {fp} (status: {status_msg}, reason: {error_msg}). Assuming it's a new file or path for deletion.")
+        print("\n")
 
     # --- Step 2: Propose Initial File Operations ---
     current_proposed_operations: List[Dict[str, str]] = []
-    if identified_file_paths:
-        print(f"\n💡 Step 2: Proposing Initial File Operations for issue #{issue_number} for files: {', '.join(identified_file_paths)}...")
-        proposer_input = (
-            f"Based on the following GitHub issue, overall plan, and list of target files, "
-            f"please propose all necessary file operations (creations, modifications, deletions for renames).\n"
-            f"Overall Plan:\n{generated_plan}\n\n"
-            f"Issue Title: {issue_title}\n"
-            f"Issue Body:\n{issue_body}\n\n"
-            f"Labels: {', '.join(issue_labels)}\n"
-            f"Relevant File Paths Identified: {', '.join(identified_file_paths)}\n"
-            "For each operation:\n"
-            "- If creating or modifying a file: State 'Changes for `path/to/file.ext`:' followed by the code in a markdown block.\n"
-            "- If deleting a file: State 'Delete file: `path/to/file.ext`'.\n"
-            "- If a file from the identified list needs no changes: State 'No changes needed for `path/to/file.ext`.'."
-            "If the issue is vague (e.g., 'add a math function'), make a reasonable choice for a simple implementation "
-            "(e.g., an `exponentiation` function if `calculator.py` is targeted, or a simple `return \"Good morning!\"` "
-            "if `greeter.py` is targeted). Clearly state any assumptions made."
-        )
-        proposer_run = await runner.run(code_proposer, input=proposer_input)
-        proposed_solution_markdown = proposer_run.final_output
-        
-        print(f"DEBUG: Code Proposer Raw Output:\n---\n{proposed_solution_markdown}\n---\n")
-
-        current_proposed_operations = parse_file_operations(proposed_solution_markdown)
-        print(f"Code Proposer Output (Parsed Operations):")
-        if current_proposed_operations:
-            for op in current_proposed_operations:
-                print(f"  File: {op['file_path']}, Action: {op.get('action')}")
-                if op.get('action') == 'modify':
-                    print(f"    Code (first 100 chars):\n{op['code'][:100]}...\n")
+    proposer_input_parts = [
+        f"Based on the following GitHub issue, overall plan, list of relevant files, and their original content (if existing), "
+        f"please propose all necessary file operations (creations, modifications, deletions for renames).\n",
+        f"Overall Plan:\n{generated_plan}\n",
+        f"Issue Title: {issue_title}\n",
+        f"Issue Body:\n{issue_body}\n",
+        f"Labels: {', '.join(issue_labels)}\n",
+        f"Relevant File Paths Identified: {', '.join(identified_file_paths_raw)}\n\n"
+    ]
+    for fp in identified_file_paths_raw: # Only include paths that were successfully identified
+        content = original_file_contents.get(fp)
+        if content is not None:
+            proposer_input_parts.append(f"Original content for `{fp}`:\n```\n{content}\n```\n")
         else:
-             print("⚠️ Code Proposer did not provide usable changes (output was empty or not parsable).\n")
-    else:
-        print("⚠️ No files identified for proposal. Skipping code proposal and review steps.\n")
+            proposer_input_parts.append(f"Original content for `{fp}`: This file is new, could not be fetched, or is intended for deletion based on plan.\n")
 
+    proposer_input_parts.append(
+        "For each operation:\n"
+        "- If creating or modifying a file: State 'Changes for `path/to/file.ext`:' followed by the COMPLETE NEW file content in a markdown block.\n"
+        "- If deleting a file: State 'Delete file: `path/to/file.ext`'.\n"
+        "- If a file from the identified list needs no changes: State 'No changes needed for `path/to/file.ext`.'\n"
+        "If the issue is vague, make a reasonable choice for a simple implementation and state your assumptions in an 'Assumptions Made:' section."
+    )
+    proposer_input = "".join(proposer_input_parts)
+
+    print(f"\n💡 Step 2: Proposing Initial File Operations for issue #{issue_number}...")
+    proposer_run = await runner.run(code_proposer, input=proposer_input)
+    proposed_solution_markdown = proposer_run.final_output
+    
+    print(f"DEBUG: Code Proposer Raw Output:\n---\n{proposed_solution_markdown}\n---\n")
+
+    current_proposed_operations = parse_file_operations(proposed_solution_markdown)
+    print(f"Code Proposer Output (Parsed Operations):")
+    if current_proposed_operations:
+        for op in current_proposed_operations:
+            print(f"  File: {op['file_path']}, Action: {op.get('action')}")
+            if op.get('action') == 'modify':
+                print(f"    Code (first 100 chars):\n{op['code'][:100]}...\n")
+    else:
+            print("⚠️ Code Proposer did not provide usable changes (output was empty or not parsable).\n")
+    
     # --- Step 2.5: Review and Revision Loop ---
     max_review_cycles = max_review_cycles_override
     final_operations_to_commit: List[Dict[str, str]] = []
@@ -313,24 +368,25 @@ async def solve_github_issue_flow(
                 revision_proposer_input_parts = [
                     f"The following file operations for GitHub issue #{issue_number} ('{issue_title}') received feedback.",
                     f"Overall Plan:\n{generated_plan}\n",
-                    "Current Proposed Operations:"
+                    "Current Proposed Operations (including original content for context if available):"
                 ]
                 for op in temp_proposed_operations:
-                     if op.get('action') == 'modify':
-                        revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Modify/Create) ---\n```\n{op['code']}\n```")
-                     elif op.get('action') == 'delete':
-                        revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Delete) ---")
-                     else:
+                    original_content_for_op = original_file_contents.get(op['file_path'], "This file may be new, or its original content was not fetched/available.")
+                    if op.get('action') == 'modify':
+                        revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Modify/Create) ---\nOriginal Content (or status):\n```\n{original_content_for_op}\n```\nProposed Code:\n```\n{op['code']}\n```")
+                    elif op.get('action') == 'delete':
+                        revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Delete) ---\nOriginal Content (or status):\n```\n{original_content_for_op}\n```\n")
+                    else:
                          revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (No Changes) ---")
 
                 revision_proposer_input_parts.append(f"\nFeedback:\nTechnical Review: {tech_feedback}\nStyle Review: {style_feedback}\n")
                 revision_proposer_input_parts.append(
-                    "Please provide a revised set of file operations. "
+                    "Please provide a revised set of file operations. Remember to use the provided original content as the base for modifications. "
                     "For each operation:\n"
-                    "- If creating or modifying a file: State 'Changes for `path/to/file.ext`:' followed by the code.\n"
+                    "- If creating or modifying a file: State 'Changes for `path/to/file.ext`:' followed by the ENTIRE NEW file content.\n"
                     "- If deleting a file: State 'Delete file: `path/to/file.ext`'.\n"
                     "- If a file no longer needs changes: State 'No changes needed for `path/to/file.ext`.'."
-                    "If the issue is vague (e.g., 'add a math function'), make a reasonable choice for a simple implementation. Clearly state any assumptions made."
+                    "If the issue is vague, make a reasonable choice for a simple implementation. Clearly state any assumptions made."
                 )
                 proposer_run = await runner.run(code_proposer, input="\n".join(revision_proposer_input_parts))
                 revised_solution_markdown = proposer_run.final_output
@@ -362,6 +418,7 @@ async def solve_github_issue_flow(
         final_operations_to_commit = []
 
     # --- Step 3: Creating/Ensuring Branch ---
+    # ... (Branch creation logic remains the same) ...
     print("\n🌿 Step 3: Creating/Ensuring Branch...")
     branch_prefix = "fix"
     if any("enhancement" in label.lower() for label in issue_labels): branch_prefix = "feature"
@@ -405,9 +462,11 @@ async def solve_github_issue_flow(
              print(f"❌ Branch operation failed or status unclear based on summary.")
     
     final_target_branch = actual_branch_name_from_tool
-
+    
     # --- Step 4: Committing Code ---
     commit_status_summary = "Commit skipped: No operations to commit or branch operation failed."
+    change_explanations_for_comment: List[Dict[str,str]] = []
+
     if final_operations_to_commit and branch_op_success:
         print(f"\n💾 Step 4: Applying File Operations to branch '{final_target_branch}'...")
         commit_message_base = f"Fix issue #{issue_number}: {issue_title}"
@@ -427,13 +486,45 @@ async def solve_github_issue_flow(
         committer_run = await runner.run(committer, input=committer_input_str)
         commit_status_summary = committer_run.final_output
         print(f"Code Committer Agent Output:\n{commit_status_summary}\n")
+
+        if "error" not in commit_status_summary.lower() and "fail" not in commit_status_summary.lower() :
+            print("\n✍️ Step 4.5: Generating Explanations for Changes...")
+            for op in final_operations_to_commit:
+                original_code_content = original_file_contents.get(op['file_path'])
+                
+                if op.get("action") == "delete":
+                    original_code_for_explainer = original_code_content if original_code_content is not None else "Content before deletion was not available or file was new."
+                    new_code_for_explainer = "This file was deleted."
+                elif op.get("action") == "modify":
+                    original_code_for_explainer = original_code_content if original_code_content is not None else "This is a new file (no original content)."
+                    new_code_for_explainer = op.get('code', "# Error: New code not found in operation proposal.")
+                else: # Should not happen if final_operations_to_commit is filtered
+                    continue
+
+                explainer_input = (
+                    f"Original GitHub Issue Title: {issue_title}\n"
+                    f"Original GitHub Issue Body:\n{issue_body}\n\n"
+                    f"Overall Plan:\n{generated_plan}\n\n"
+                    f"File Path: {op['file_path']}\n"
+                    f"Action Taken: {op['action']}\n"
+                    f"Original Code Snippet (or status):\n{original_code_for_explainer}\n\n"
+                    f"New Code Snippet (or status):\n{new_code_for_explainer}\n\n"
+                    "Explain this specific change."
+                )
+                explanation_run = await runner.run(change_explainer, input=explainer_input)
+                change_explanations_for_comment.append({
+                    "file_path": op['file_path'],
+                    "action": op['action'],
+                    "explanation": explanation_run.final_output
+                })
+                print(f"  Explanation for {op['file_path']} ({op['action']}): {explanation_run.final_output}")
+
     elif not final_operations_to_commit:
          commit_status_summary = "Commit skipped: No approved file operations to commit."
          print(f"⚠️ {commit_status_summary}")
     else:
         commit_status_summary = f"Commit skipped due to branch operation failure ({branch_agent_summary})."
         print(f"⚠️ {commit_status_summary}")
-
 
     # --- Step 5: Posting Summary Comment ---
     print("\n💬 Step 5: Posting Summary Comment...")
@@ -444,17 +535,22 @@ async def solve_github_issue_flow(
     summary_comment_parts.append(f"\n**Generated Plan:**\n{generated_plan}")
 
     if target_file_override:
-        summary_comment_parts.append(f"\n**File Identification:**\nUser specified target file(s): `{', '.join(identified_file_paths)}`.")
-    elif identified_file_paths:
-        summary_comment_parts.append(f"\n**File Identification:**\nAgent identified target file(s): `{', '.join(identified_file_paths)}`.")
+        summary_comment_parts.append(f"\n**File Identification:**\nUser specified target file(s): `{', '.join(identified_file_paths_raw)}`.")
+    elif identified_file_paths_raw:
+        summary_comment_parts.append(f"\n**File Identification:**\nAgent identified target file(s): `{', '.join(identified_file_paths_raw)}`.")
     else:
         summary_comment_parts.append(f"\n**File Identification:**\nNo specific files were identified for modification.")
 
-    if final_operations_to_commit:
-        summary_comment_parts.append(f"\n**Finalized File Operations:**")
+    if change_explanations_for_comment:
+        summary_comment_parts.append(f"\n**Summary of Changes Applied:**")
+        for item in change_explanations_for_comment:
+            summary_comment_parts.append(f"\n* **File:** `{item['file_path']}` ({item['action']})")
+            summary_comment_parts.append(f"    * **Explanation:** {item['explanation']}")
+    elif final_operations_to_commit:
+        summary_comment_parts.append(f"\n**Finalized File Operations (Commit Attempted but Explanations Skipped):**")
         for op in final_operations_to_commit:
             if op.get('action') == 'modify':
-                summary_comment_parts.append(f"\n*Modify/Create file `{op['file_path']}`:*\n```\n{op['code']}\n```")
+                summary_comment_parts.append(f"\n*Modify/Create file `{op['file_path']}`*")
             elif op.get('action') == 'delete':
                  summary_comment_parts.append(f"\n*Delete file `{op['file_path']}`*")
     elif current_proposed_operations and any(p.get('action') != 'no_change' for p in current_proposed_operations):
@@ -544,4 +640,3 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
 
     main()
-    

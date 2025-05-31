@@ -79,6 +79,34 @@ class GitHubClient:
                 mock_response._content = b'{"error": "Network request to GitHub failed."}' # type: ignore
             return mock_response
 
+    async def delete_file_on_branch(self, owner: str, repo: str, branch_name: str, file_path: str, commit_message: str, sha: str) -> Dict[str, Any]:
+        """
+        Deletes a file from a specific branch.
+        # ... (rest of the docstring)
+        """
+        if not self.token:
+            return {"error": "GitHub token is required to delete files."}
+
+        endpoint = f"/repos/{owner}/{repo}/contents/{file_path}"
+        payload = {
+            "message": commit_message,
+            "sha": sha,
+            "branch": branch_name
+        }
+        print(f"GitHubClient: Deleting file {owner}/{repo}/{file_path} on branch '{branch_name}' (SHA: {sha})")
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda: self._make_request("DELETE", endpoint, json=payload))
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            error_details = {"error": f"HTTPError deleting file: {e.response.status_code} {e.response.reason}", "details_text": e.response.text}
+            try: error_details["details_json"] = e.response.json()
+            except ValueError: pass
+            return error_details
+        except Exception as e:
+            return {"error": f"An unexpected error occurred during file deletion: {str(e)}"}
+
     async def get_default_branch(self, owner: str, repo: str) -> Optional[str]:
         """
         Gets the default branch name for a repository.

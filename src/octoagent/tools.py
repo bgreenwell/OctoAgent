@@ -52,6 +52,44 @@ def parse_github_issue_url(issue_url: str) -> Optional[Tuple[str, str, int]]:
 
 github_client = GitHubClient()
 
+class FileChange(TypedDict): # This TypedDict is for commit_files_to_branch, not directly for delete.
+    file_path: str
+    file_content: str
+
+@function_tool
+async def delete_file_from_branch(repo_owner: str, repo_name: str, branch_name: str, file_path: str, commit_message: str) -> Dict[str, Any]:
+    """
+    Deletes a specific file from a given branch in a repository.
+    # ... (rest of the docstring)
+    """
+    print(f"Tool (tools.py): Attempting to delete file {repo_owner}/{repo_name}/{file_path} from branch '{branch_name}'")
+    if not github_client.token: # Ensure github_client is instantiated in this file
+        return {"error": "GITHUB_TOKEN is required."}
+
+    file_sha = await github_client.get_file_sha(repo_owner, repo_name, file_path, branch_name)
+    if not file_sha:
+        error_msg = f"File '{file_path}' not found on branch '{branch_name}', cannot delete."
+        print(f"  {error_msg}")
+        return {"error": error_msg, "status": "file_not_found"}
+
+    result = await github_client.delete_file_on_branch(
+        owner=repo_owner,
+        repo=repo_name,
+        branch_name=branch_name,
+        file_path=file_path,
+        commit_message=commit_message,
+        sha=file_sha
+    )
+    # ... (rest of the error handling and success return)
+    if "error" in result:
+        return result
+    else:
+        return {
+            "message": f"File '{file_path}' deleted successfully.",
+            "details": result,
+            "status": "success"
+        }
+
 @function_tool
 async def get_file_content(repo_owner: str, repo_name: str, file_path: str, branch: str) -> Dict[str, Any]:
     """
