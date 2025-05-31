@@ -136,3 +136,9 @@ For feature requests, please describe the problem you're trying to solve and you
 - [x] Improve logic to automatically determine target file
 - [ ] Add robust error handling and retries for API calls
 - [ ] Create a more sophisticated review and revision loop
+- [ ] Implement multi-file context awareness
+- [ ] Add agent to create a pull request automatically (maybe make this optional, like `--create_pr` flag)
+- [ ] Configuration file for agent behavior
+  * Instead of relying solely on command-line arguments, a configuration file (e.g., `.octoagent.yml`) could be added to the repository. This would allow users to define more complex behaviors, such as specifying different agent models (e.g., GPT-4 vs. GPT-3.5), setting different review standards, or providing persistent instructions for specific repositories.
+  - [ ] Cost and token usage tracking
+  - [ ] Refine agent personas and specializations (e.g., R vs. Python expert)
