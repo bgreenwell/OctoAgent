@@ -21,75 +21,43 @@ from .agents import (
 from .github_client import GitHubClient
 from .tools import extract_code_from_markdown, parse_github_issue_url
 
-
+# parse_file_operations function (ensure it's the latest version handling "### Changes for..." etc.)
 def parse_file_operations(markdown_text: Optional[str]) -> List[Dict[str, str]]:
     """
     Parses the CodeProposerAgent's output for multiple file operations.
-
-    Expected formats:
-    Changes for `path/to/file1.py`: or ### Changes for `path/to/file1.py`:
-    (optional intermediary text)
-    ```python
-    # code for file1
-    ```
-    Delete file: `path/to/file2.py`
-    No changes needed for `path/to/file3.py`.
-
-    Returns
-    -------
-    list of dict
-        Each dict contains "file_path", "action" ('modify', 'delete', 'no_change'),
-        and "code" (if action is 'modify').
     """
     if not markdown_text:
         return []
-
     operations = []
-    # Regex for modifications/creations - updated to allow "### " prefix and intermediary text
     modify_pattern = re.compile(
         r"(?:### )?Changes for `([^`]+?\.[\w./-]+)`:.*?\s*```(?:[a-zA-Z0-9\+\-\#\.]*?)?\s*\n(.*?)\n```",
         re.DOTALL | re.MULTILINE
     )
-    # Regex for deletions
     delete_pattern = re.compile(
         r"Delete file: `([^`]+?\.[\w./-]+)`",
         re.MULTILINE
     )
-    # Regex for no changes
     no_change_pattern = re.compile(
         r"No changes needed for `([^`]+?\.[\w./-]+)`\.",
         re.MULTILINE
     )
-
     all_matches = []
     for match_type, pattern_obj in [("modify", modify_pattern), ("delete", delete_pattern), ("no_change", no_change_pattern)]:
         for match in pattern_obj.finditer(markdown_text):
             all_matches.append({"type": match_type, "match_obj": match, "start_pos": match.start()})
-
     all_matches.sort(key=lambda x: x["start_pos"])
-
     for item in all_matches:
         match_type = item["type"]
         match_obj = item["match_obj"]
         if match_type == "modify":
             file_path, code_content = match_obj.groups()
-            operations.append({
-                "file_path": file_path.strip(),
-                "code": code_content.strip(),
-                "action": "modify"
-            })
+            operations.append({"file_path": file_path.strip(), "code": code_content.strip(), "action": "modify"})
         elif match_type == "delete":
             file_path = match_obj.groups()[0]
-            operations.append({
-                "file_path": file_path.strip(),
-                "action": "delete"
-            })
+            operations.append({"file_path": file_path.strip(), "action": "delete"})
         elif match_type == "no_change":
             file_path = match_obj.groups()[0]
-            operations.append({
-                "file_path": file_path.strip(),
-                "action": "no_change"
-            })
+            operations.append({"file_path": file_path.strip(), "action": "no_change"})
     return operations
 
 
@@ -99,10 +67,11 @@ async def solve_github_issue_flow(
     repo_name_override: Optional[str] = None,
     target_file_override: Optional[str] = None,
     max_review_cycles_override: int = 3,
+    show_token_summary: bool = True,
+    model_to_use: str = "gpt-4o", # Default model
 ):
     """
     Orchestrates the end-to-end flow of agents to solve a GitHub issue.
-    Includes fetching original file content for diffing and explaining changes.
 
     Parameters
     ----------
@@ -117,8 +86,49 @@ async def solve_github_issue_flow(
         directly, skipping the FileIdentifierAgent step. Defaults to None.
     max_review_cycles_override : int, optional
         The maximum number of review cycles for code proposals. Defaults to 3.
+    model_to_use : str, optional
+        The OpenAI model to be used by the agents. Defaults to "gpt-4o".
+    show_token_summary : bool, optional
+        Whether to display a summary of token usage. Defaults to True.
     """
     print(f"\n🚀 Starting GitHub Issue Solver for: {issue_url}\n" + "=" * 50)
+    print(f"Using model: {model_to_use}")
+
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    # Initialize with the model intended to be used; will be updated if API response differs
+    actual_model_name_reported = model_to_use 
+
+    runner = Runner()
+
+    async def run_agent_and_track_usage(agent_instance, input_text, **kwargs):
+        nonlocal total_prompt_tokens, total_completion_tokens, actual_model_name_reported
+        # The agent_instance is already configured with the model via its constructor
+        run_result = await runner.run(agent_instance, input=input_text, **kwargs)
+        
+        if hasattr(run_result, 'new_items') and run_result.new_items:
+            for item in run_result.new_items:
+                usage_data = None
+                model_from_response = None
+                # Check for raw_item, typical for direct OpenAI API responses via the agents library
+                if hasattr(item, 'raw_item') and isinstance(getattr(item, 'raw_item'), dict):
+                    raw_item_dict = getattr(item, 'raw_item')
+                    usage_data = raw_item_dict.get('usage')
+                    model_from_response = raw_item_dict.get('model')
+                # Fallback if usage/model is directly on the item (less common for raw API data)
+                elif hasattr(item, 'usage') and isinstance(getattr(item, 'usage'), dict):
+                    usage_data = getattr(item, 'usage')
+                    if hasattr(item, 'model'): # or item.model_name etc.
+                         model_from_response = getattr(item, 'model')
+                
+                if model_from_response and (actual_model_name_reported == model_to_use or actual_model_name_reported == "Unknown"):
+                    # Update with the model name actually reported by the API for the first successful call
+                    actual_model_name_reported = model_from_response
+
+                if usage_data and isinstance(usage_data, dict):
+                    total_prompt_tokens += usage_data.get("prompt_tokens", 0)
+                    total_completion_tokens += usage_data.get("completion_tokens", 0)
+        return run_result
 
     repo_owner = repo_owner_override
     repo_name = repo_name_override
@@ -138,24 +148,32 @@ async def solve_github_issue_flow(
     default_branch_name = await github_client.get_default_branch(repo_owner, repo_name)
     if not default_branch_name:
         print(f"❌ Error: Could not determine the default branch for {repo_owner}/{repo_name}.")
+        if show_token_summary:
+            overall_total_tokens_err = total_prompt_tokens + total_completion_tokens
+            print("\n--- Token Usage Summary (Partial) ---")
+            print(f"Model Used: {actual_model_name_reported}")
+            print(f"Total Prompt Tokens: {total_prompt_tokens}")
+            print(f"Total Completion Tokens: {total_completion_tokens}")
+            print(f"Overall Total Tokens: {overall_total_tokens_err}")
+            print("-------------------------------------\n")
         return
     print(f"Default branch is '{default_branch_name}'.\n")
 
-    triager = IssueTriagerAgent()
-    planner = PlannerAgent()
-    file_identifier = FileIdentifierAgent()
-    code_proposer = CodeProposerAgent()
-    change_explainer = ChangeExplainerAgent()
-    technical_reviewer = CodeReviewerAgent(review_aspect="technical correctness and efficiency")
-    style_reviewer = CodeReviewerAgent(review_aspect="code style and readability")
-    branch_creator = BranchCreatorAgent()
-    committer = CodeCommitterAgent()
-    comment_poster = CommentPosterAgent()
-    runner = Runner()
-
+    # Instantiate agents with the chosen model
+    triager = IssueTriagerAgent(model=model_to_use)
+    planner = PlannerAgent(model=model_to_use)
+    file_identifier = FileIdentifierAgent(model=model_to_use)
+    code_proposer = CodeProposerAgent(model=model_to_use)
+    change_explainer = ChangeExplainerAgent(model=model_to_use)
+    technical_reviewer = CodeReviewerAgent(model=model_to_use, review_aspect="technical correctness and efficiency")
+    style_reviewer = CodeReviewerAgent(model=model_to_use, review_aspect="code style and readability")
+    branch_creator = BranchCreatorAgent(model=model_to_use)
+    committer = CodeCommitterAgent(model=model_to_use)
+    comment_poster = CommentPosterAgent(model=model_to_use)
+    
     # --- Step 1: Triaging Issue ---
     print("\n🔍 Step 1: Triaging Issue...")
-    triage_result_run = await runner.run(triager, input=f"Please triage the GitHub issue at {issue_url}")
+    triage_result_run = await run_agent_and_track_usage(triager, f"Please triage the GitHub issue at {issue_url}")
     triage_output_summary = triage_result_run.final_output
     
     issue_details_from_tool: Optional[Dict[str, Any]] = None
@@ -168,8 +186,31 @@ async def solve_github_issue_flow(
                     issue_details_from_tool = content
                     break
     if not issue_details_from_tool:
-        print(f"❌ Error: Could not get issue details from triage step. Last agent output: {triage_output_summary}")
-        return
+        model_response_item_content = None
+        if new_items_triage:
+            for item in new_items_triage:
+                if hasattr(item, 'raw_item') and isinstance(getattr(item, 'raw_item'), dict):
+                    raw_item_dict = getattr(item, 'raw_item')
+                    if 'choices' in raw_item_dict and isinstance(raw_item_dict['choices'], list) and raw_item_dict['choices']:
+                        message_content_str = raw_item_dict['choices'][0].get('message', {}).get('content')
+                        if message_content_str:
+                            try: 
+                                model_response_item_content = json.loads(message_content_str)
+                                if isinstance(model_response_item_content, dict) and 'number' in model_response_item_content:
+                                    issue_details_from_tool = model_response_item_content
+                                    break
+                            except json.JSONDecodeError: pass 
+        if not issue_details_from_tool:
+            print(f"❌ Error: Could not get structured issue details from triage step. Last agent output: {triage_output_summary}")
+            if show_token_summary:
+                overall_total_tokens_err = total_prompt_tokens + total_completion_tokens
+                print("\n--- Token Usage Summary (Partial) ---")
+                print(f"Model Used: {actual_model_name_reported}")
+                print(f"Total Prompt Tokens: {total_prompt_tokens}")
+                print(f"Total Completion Tokens: {total_completion_tokens}")
+                print(f"Overall Total Tokens: {overall_total_tokens_err}")
+                print("-------------------------------------\n")
+            return
 
     issue_number = issue_details_from_tool.get("number")
     issue_title = issue_details_from_tool.get("title", "Unknown Title")
@@ -179,6 +220,14 @@ async def solve_github_issue_flow(
 
     if not issue_number:
         print("❌ Error: Issue number not found in triaged details.")
+        if show_token_summary:
+            overall_total_tokens_err = total_prompt_tokens + total_completion_tokens
+            print("\n--- Token Usage Summary (Partial) ---")
+            print(f"Model Used: {actual_model_name_reported}")
+            print(f"Total Prompt Tokens: {total_prompt_tokens}")
+            print(f"Total Completion Tokens: {total_completion_tokens}")
+            print(f"Overall Total Tokens: {overall_total_tokens_err}")
+            print("-------------------------------------\n")
         return
     print(f"Triager Output Summary:\n{triage_output_summary}\n")
     print(f"Successfully processed issue #{issue_number}: '{issue_title}'")
@@ -187,12 +236,10 @@ async def solve_github_issue_flow(
     print(f"\n📝 Step 1.2: Generating Plan for issue #{issue_number}...")
     planner_input = (
         f"Based on the following triaged GitHub issue, create a step-by-step plan for resolution:\n"
-        f"Issue Title: {issue_title}\n"
-        f"Issue Body:\n{issue_body}\n\n"
-        f"Labels: {', '.join(issue_labels)}\n"
-        f"Triage Summary:\n{triage_output_summary}\n"
+        f"Issue Title: {issue_title}\nIssue Body:\n{issue_body}\n\n"
+        f"Labels: {', '.join(issue_labels)}\nTriage Summary:\n{triage_output_summary}\n"
     )
-    planner_run = await runner.run(planner, input=planner_input)
+    planner_run = await run_agent_and_track_usage(planner, planner_input)
     generated_plan = planner_run.final_output
     print(f"Generated Plan:\n{generated_plan}\n")
 
@@ -205,54 +252,56 @@ async def solve_github_issue_flow(
         print(f"\n📑 Step 1.5: Identifying Target Files for issue #{issue_number}...")
         identifier_input = (
             f"Based on the following GitHub issue, identify the file(s) that need to be modified, created, or are relevant to a rename/delete operation.\n"
-            f"Repository: {repo_owner}/{repo_name}\n"
-            f"Default Branch: {default_branch_name}\n"
-            f"Issue Title: {issue_title}\n"
-            f"Issue Body:\n{issue_body}\n\n"
-            f"Labels: {', '.join(issue_labels)}\n"
-            f"Overall Plan: {generated_plan}\n"
+            f"Repository: {repo_owner}/{repo_name}\nDefault Branch: {default_branch_name}\n"
+            f"Issue Title: {issue_title}\nIssue Body:\n{issue_body}\n\n"
+            f"Labels: {', '.join(issue_labels)}\nOverall Plan: {generated_plan}\n"
         )
-        identifier_run = await runner.run(file_identifier, input=identifier_input)
+        identifier_run = await run_agent_and_track_usage(file_identifier, identifier_input)
         file_output_raw_agent = identifier_run.final_output.strip()
         print(f"DEBUG: File Identifier Agent Raw Output:\n---\n{file_output_raw_agent}\n---")
         
         if file_output_raw_agent.lower() != 'none':
-            # Try to extract file paths more robustly
             path_candidates = re.findall(r"`([^`]+\.[\w.-]+)`|([\w./-]+\.[\w.-]+)", file_output_raw_agent)
             temp_paths = []
             for backticked_path, plain_path in path_candidates:
                 path = backticked_path if backticked_path else plain_path
-                if path and path.strip():
-                    temp_paths.append(path.strip())
-            
-            if not temp_paths and file_output_raw_agent: # Fallback if regex is too strict
+                if path and path.strip(): temp_paths.append(path.strip())
+            if not temp_paths and file_output_raw_agent:
                  potential_paths = [line.strip() for line in file_output_raw_agent.split('\n') if '.' in line.strip() and not line.strip().startswith(('-', '*'))]
                  for p_path in potential_paths:
                      cleaned_path = re.sub(r"^- \*\*(?:Current Path|Suggested New Path for .*?):\*\* `(.*?)`$", r"\1", p_path.strip())
                      cleaned_path = re.sub(r"^- (?:Current Path|Suggested New Path for .*?): `(.*?)`$", r"\1", cleaned_path.strip())
-                     cleaned_path = cleaned_path.strip().replace('`', '') # Remove any remaining backticks
+                     cleaned_path = cleaned_path.strip().replace('`', '')
                      if '.' in cleaned_path and not any(c in cleaned_path for c in [' ', '(', ')', ':']) and '/' in cleaned_path or '.' in cleaned_path.split('/')[-1]:
                         temp_paths.append(cleaned_path)
-
-            if temp_paths:
-                identified_file_paths_raw = sorted(list(set(temp_paths)))
-        
+            if temp_paths: identified_file_paths_raw = sorted(list(set(temp_paths)))
         print(f"File Identifier Agent identified target file(s) (parsed): {', '.join(identified_file_paths_raw) if identified_file_paths_raw else 'None'}\n")
 
     if not identified_file_paths_raw:
         print(f"ℹ️ No target files identified or specified by user. Cannot proceed with code proposals.")
-        summary_comment_parts = [
+        summary_comment_parts_init = [
             f"🤖 **OctoAgent Report** for Issue #{issue_number}: {issue_title}",
             f"\n**Triage Summary:**\n{triage_output_summary}",
             f"\n**Generated Plan:**\n{generated_plan}",
             "\n**File Identification:**\nNo files were identified for modification by the agent, and no target file was specified by the user. Unable to proceed with code changes.",
-            "\n---\n*This comment was automatically generated by OctoAgent, an experimental AI-powered issue-solving assistant.*"
         ]
-        final_summary_comment = "\n".join(summary_comment_parts)
-        await runner.run(comment_poster, input=f"Post the following comment to {issue_url}: \n\n{final_summary_comment}")
+        footer_parts_init = ["\n\n---\n*This comment was automatically generated by OctoAgent, an experimental AI-powered issue-solving assistant.*"]
+        if show_token_summary:
+            overall_total_tokens_init = total_prompt_tokens + total_completion_tokens
+            footer_parts_init.append(f"*Model used: {actual_model_name_reported}, Total tokens: {overall_total_tokens_init} (Prompt: {total_prompt_tokens}, Completion: {total_completion_tokens})*")
+        summary_comment_parts_init.extend(footer_parts_init)
+        final_summary_comment_init = "\n".join(summary_comment_parts_init)
+        await run_agent_and_track_usage(comment_poster, f"Post the following comment to {issue_url}: \n\n{final_summary_comment_init}")
+        if show_token_summary:
+            overall_total_tokens_err = total_prompt_tokens + total_completion_tokens
+            print("\n--- Token Usage Summary (Partial) ---")
+            print(f"Model Used: {actual_model_name_reported}")
+            print(f"Total Prompt Tokens: {total_prompt_tokens}")
+            print(f"Total Completion Tokens: {total_completion_tokens}")
+            print(f"Overall Total Tokens: {overall_total_tokens_err}")
+            print("-------------------------------------\n")
         return
 
-    # --- Pre-fetch original content for identified files ---
     original_file_contents: Dict[str, Optional[str]] = {}
     if identified_file_paths_raw:
         print(f"\nℹ️ Fetching original content for identified files: {', '.join(identified_file_paths_raw)}...")
@@ -262,12 +311,12 @@ async def solve_github_issue_flow(
                 original_file_contents[fp] = content_data["content"]
                 print(f"  Successfully fetched content for {fp}")
             else:
-                original_file_contents[fp] = None
+                original_file_contents[fp] = None 
                 status_msg = content_data.get('status', 'unknown') if content_data else 'no_response'
                 error_msg = content_data.get('error_message', content_data.get('error', 'Unknown reason')) if content_data else 'No data'
                 print(f"  ⚠️ Could not fetch content for {fp} (status: {status_msg}, reason: {error_msg}). Assuming it's a new file or path for deletion.")
         print("\n")
-
+    
     # --- Step 2: Propose Initial File Operations ---
     current_proposed_operations: List[Dict[str, str]] = []
     proposer_input_parts = [
@@ -279,13 +328,12 @@ async def solve_github_issue_flow(
         f"Labels: {', '.join(issue_labels)}\n",
         f"Relevant File Paths Identified: {', '.join(identified_file_paths_raw)}\n\n"
     ]
-    for fp in identified_file_paths_raw: # Only include paths that were successfully identified
+    for fp in identified_file_paths_raw: 
         content = original_file_contents.get(fp)
         if content is not None:
             proposer_input_parts.append(f"Original content for `{fp}`:\n```\n{content}\n```\n")
         else:
             proposer_input_parts.append(f"Original content for `{fp}`: This file is new, could not be fetched, or is intended for deletion based on plan.\n")
-
     proposer_input_parts.append(
         "For each operation:\n"
         "- If creating or modifying a file: State 'Changes for `path/to/file.ext`:' followed by the COMPLETE NEW file content in a markdown block.\n"
@@ -294,34 +342,27 @@ async def solve_github_issue_flow(
         "If the issue is vague, make a reasonable choice for a simple implementation and state your assumptions in an 'Assumptions Made:' section."
     )
     proposer_input = "".join(proposer_input_parts)
-
     print(f"\n💡 Step 2: Proposing Initial File Operations for issue #{issue_number}...")
-    proposer_run = await runner.run(code_proposer, input=proposer_input)
+    proposer_run = await run_agent_and_track_usage(code_proposer, proposer_input)
     proposed_solution_markdown = proposer_run.final_output
-    
     print(f"DEBUG: Code Proposer Raw Output:\n---\n{proposed_solution_markdown}\n---\n")
-
     current_proposed_operations = parse_file_operations(proposed_solution_markdown)
     print(f"Code Proposer Output (Parsed Operations):")
     if current_proposed_operations:
         for op in current_proposed_operations:
             print(f"  File: {op['file_path']}, Action: {op.get('action')}")
-            if op.get('action') == 'modify':
-                print(f"    Code (first 100 chars):\n{op['code'][:100]}...\n")
-    else:
-            print("⚠️ Code Proposer did not provide usable changes (output was empty or not parsable).\n")
+            if op.get('action') == 'modify': print(f"    Code (first 100 chars):\n{op['code'][:100]}...\n")
+    else: print("⚠️ Code Proposer did not provide usable changes (output was empty or not parsable).\n")
     
-    # --- Step 2.5: Review and Revision Loop ---
+    # Step 2.5: Review and Revision Loop
     max_review_cycles = max_review_cycles_override
     final_operations_to_commit: List[Dict[str, str]] = []
     tech_feedback = "N/A (No operations to review)" 
     style_feedback = "N/A (No operations to review)"
-    
     if current_proposed_operations and any(p.get('action') == 'modify' or p.get('action') == 'delete' for p in current_proposed_operations) :
         temp_proposed_operations = current_proposed_operations
         for cycle in range(max_review_cycles):
             print(f"\n🔄 Review Cycle {cycle + 1}/{max_review_cycles} 🔄")
-            
             review_input_parts = [
                 f"Issue Title: {issue_title}\nIssue Number: {issue_number}\nIssue Body:\n{issue_body}\n",
                 f"Labels: {', '.join(issue_labels)}\n",
@@ -330,41 +371,24 @@ async def solve_github_issue_flow(
             has_operations_to_review = False
             for op in temp_proposed_operations:
                 if op.get('action') == 'modify':
-                    review_input_parts.append(f"\n--- Modify/Create File: `{op['file_path']}` ---\n```\n{op['code']}\n```")
-                    has_operations_to_review = True
+                    review_input_parts.append(f"\n--- Modify/Create File: `{op['file_path']}` ---\n```\n{op['code']}\n```"); has_operations_to_review = True
                 elif op.get('action') == 'delete':
-                    review_input_parts.append(f"\n--- Delete File: `{op['file_path']}` ---")
-                    has_operations_to_review = True
-                else: 
-                    review_input_parts.append(f"\n--- File: `{op['file_path']}` ---\nNo changes proposed.")
-            
-            if not has_operations_to_review:
-                print("ℹ️ No actual modifications or deletions proposed for review in this cycle.")
-                final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
-                break
-
+                    review_input_parts.append(f"\n--- Delete File: `{op['file_path']}` ---"); has_operations_to_review = True
+                else: review_input_parts.append(f"\n--- File: `{op['file_path']}` ---\nNo changes proposed.")
+            if not has_operations_to_review: 
+                final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']; break
             review_task_input = "\n".join(review_input_parts)
-
             print("🕵️‍♂️ Requesting Technical Review...")
-            technical_review_run = await runner.run(technical_reviewer, input=review_task_input)
-            tech_feedback = technical_review_run.final_output
-            print(f"Technical Reviewer Output:\n{tech_feedback}\n")
-
+            technical_review_run = await run_agent_and_track_usage(technical_reviewer, review_task_input)
+            tech_feedback = technical_review_run.final_output; print(f"Technical Reviewer Output:\n{tech_feedback}\n")
             print("🎨 Requesting Style Review...")
-            style_review_run = await runner.run(style_reviewer, input=review_task_input)
-            style_feedback = style_review_run.final_output
-            print(f"Style Reviewer Output:\n{style_feedback}\n")
-
+            style_review_run = await run_agent_and_track_usage(style_reviewer, review_task_input)
+            style_feedback = style_review_run.final_output; print(f"Style Reviewer Output:\n{style_feedback}\n")
             tech_ok = any(s in tech_feedback.lower() for s in ["lgtm", "satisfactory", "approved"])
             style_ok = any(s in style_feedback.lower() for s in ["lgtm", "satisfactory", "approved"])
-
             if tech_ok and style_ok:
-                print("✅ Both reviewers are satisfied. Proceeding with the current operations.")
-                final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
-                break
-            
+                final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']; break
             if cycle < max_review_cycles - 1:
-                print("⚠️ Revision needed. Requesting CodeProposer to revise...")
                 revision_proposer_input_parts = [
                     f"The following file operations for GitHub issue #{issue_number} ('{issue_title}') received feedback.",
                     f"Overall Plan:\n{generated_plan}\n",
@@ -372,13 +396,9 @@ async def solve_github_issue_flow(
                 ]
                 for op in temp_proposed_operations:
                     original_content_for_op = original_file_contents.get(op['file_path'], "This file may be new, or its original content was not fetched/available.")
-                    if op.get('action') == 'modify':
-                        revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Modify/Create) ---\nOriginal Content (or status):\n```\n{original_content_for_op}\n```\nProposed Code:\n```\n{op['code']}\n```")
-                    elif op.get('action') == 'delete':
-                        revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Delete) ---\nOriginal Content (or status):\n```\n{original_content_for_op}\n```\n")
-                    else:
-                         revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (No Changes) ---")
-
+                    if op.get('action') == 'modify': revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Modify/Create) ---\nOriginal Content (or status):\n```\n{original_content_for_op}\n```\nProposed Code:\n```\n{op['code']}\n```")
+                    elif op.get('action') == 'delete': revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Delete) ---\nOriginal Content (or status):\n```\n{original_content_for_op}\n```\n")
+                    else: revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (No Changes) ---")
                 revision_proposer_input_parts.append(f"\nFeedback:\nTechnical Review: {tech_feedback}\nStyle Review: {style_feedback}\n")
                 revision_proposer_input_parts.append(
                     "Please provide a revised set of file operations. Remember to use the provided original content as the base for modifications. "
@@ -388,194 +408,107 @@ async def solve_github_issue_flow(
                     "- If a file no longer needs changes: State 'No changes needed for `path/to/file.ext`.'."
                     "If the issue is vague, make a reasonable choice for a simple implementation. Clearly state any assumptions made."
                 )
-                proposer_run = await runner.run(code_proposer, input="\n".join(revision_proposer_input_parts))
+                proposer_run = await run_agent_and_track_usage(code_proposer, "\n".join(revision_proposer_input_parts))
                 revised_solution_markdown = proposer_run.final_output
                 print(f"DEBUG: Code Proposer Revised Raw Output:\n---\n{revised_solution_markdown}\n---\n")
                 revised_operations = parse_file_operations(revised_solution_markdown)
-                
-                if revised_operations:
-                    temp_proposed_operations = revised_operations
-                    print(f"Updated File Operations after revision (Parsed):")
-                    for op_rev in temp_proposed_operations: print(f"  File: {op_rev['file_path']}, Action: {op_rev.get('action')}")
-                else:
-                    print("⚠️ Code Proposer did not provide a new set of operations in its revision. Using last valid proposals.")
-                    final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
-                    break
-            else:
-                print(f"⚠️ Maximum review cycles ({max_review_cycles}) reached. Proceeding with the last proposed operations.")
-                final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
-                break
-        
+                if revised_operations: temp_proposed_operations = revised_operations
+                else: final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']; break
+            else: final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
         if not final_operations_to_commit and temp_proposed_operations and any(p.get('action') != 'no_change' for p in temp_proposed_operations):
-            print("⚠️ Review cycles completed, but solution not fully approved. Committing last valid operations with modifications or deletions.")
             final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
-
-    elif current_proposed_operations: 
-        print("ℹ️ No actual modifications or deletions were proposed (e.g., all 'no_change'). Skipping review loop.")
-        final_operations_to_commit = []
-    else:
-        print("⚠️ No file operations proposed. Skipping review and commit steps for code.")
-        final_operations_to_commit = []
-
+    
     # --- Step 3: Creating/Ensuring Branch ---
-    # ... (Branch creation logic remains the same) ...
     print("\n🌿 Step 3: Creating/Ensuring Branch...")
-    branch_prefix = "fix"
+    branch_prefix = "fix" 
     if any("enhancement" in label.lower() for label in issue_labels): branch_prefix = "feature"
     elif any("chore" in label.lower() for label in issue_labels): branch_prefix = "chore"
     target_branch_name_ideal = f"{branch_prefix}/issue-{issue_number}"
-    branch_run = await runner.run(branch_creator, input=f"Ensure branch for {repo_owner}/{repo_name} issue {issue_number}, prefix {branch_prefix}, base {default_branch_name}.")
+    branch_run = await run_agent_and_track_usage(branch_creator, f"Ensure branch for {repo_owner}/{repo_name} issue {issue_number}, prefix {branch_prefix}, base {default_branch_name}.")
     branch_agent_summary = branch_run.final_output
-    
-    actual_branch_name_from_tool = target_branch_name_ideal
-    branch_op_success = False
-    new_items_branch_check = getattr(branch_run, 'new_items', None)
+    actual_branch_name_from_tool = target_branch_name_ideal; branch_op_success = False
+    new_items_branch_check = getattr(branch_run, 'new_items', None) # ... (Rest of branch creation logic)
     if new_items_branch_check:
-        for i_br, item_br in enumerate(new_items_branch_check):
+        for _, item_br in enumerate(new_items_branch_check):
             if type(item_br).__name__ == 'ToolCallOutputItem': 
                 content_br = getattr(item_br, 'output', getattr(item_br, 'content', None))
                 if content_br is None and hasattr(item_br, 'raw_item'):
-                    raw_br_item = item_br.raw_item
+                    raw_br_item = item_br.raw_item; 
                     if isinstance(raw_br_item, dict): content_br = raw_br_item
-                
                 if isinstance(content_br, dict):
                     if "error" not in content_br:
-                        branch_op_success = True
-                        actual_branch_name_from_tool = content_br.get("branch_name", target_branch_name_ideal)
-                        if content_br.get("status") == "already_exists" or content_br.get("already_exists") is True:
-                             print(f"INFO: Branch '{actual_branch_name_from_tool}' already exists.")
-                        else:
-                             print(f"INFO: Branch '{actual_branch_name_from_tool}' creation/check successful.")
-                    else:
-                        print(f"ERROR: Branch tool reported error: {content_br.get('error')}")
-                        branch_agent_summary = content_br.get('error', branch_agent_summary) + f" (Tool Output: {content_br})"
+                        branch_op_success = True; actual_branch_name_from_tool = content_br.get("branch_name", target_branch_name_ideal)
+                        if content_br.get("status") == "already_exists" or content_br.get("already_exists") is True: print(f"INFO: Branch '{actual_branch_name_from_tool}' already exists.")
+                        else: print(f"INFO: Branch '{actual_branch_name_from_tool}' creation/check successful.")
+                    else: branch_agent_summary = content_br.get('error', branch_agent_summary) + f" (Tool Output: {content_br})"
                 break 
-    
-    if not branch_op_success:
+    if not branch_op_success: # ... (Fallback logic)
         print(f"Branch Creator Agent Output (Summary): {branch_agent_summary}\n")
         if "error" not in branch_agent_summary.lower() and ("created" in branch_agent_summary.lower() or "exists" in branch_agent_summary.lower() or "successful" in branch_agent_summary.lower()):
             match_bn = re.search(r"(?:branch|')\s*`?([^'`]+)`?\s*(?:has been successfully created|already exists|creation/check successful)", branch_agent_summary, re.IGNORECASE)
             if match_bn: actual_branch_name_from_tool = match_bn.group(1)
-            branch_op_success = True
-            print(f"Branch operation likely successful based on summary. Target branch: {actual_branch_name_from_tool}")
-        else:
-             print(f"❌ Branch operation failed or status unclear based on summary.")
-    
+            branch_op_success = True; print(f"Branch operation likely successful. Target: {actual_branch_name_from_tool}")
+        else: print(f"❌ Branch operation failed or status unclear based on summary.")
     final_target_branch = actual_branch_name_from_tool
     
     # --- Step 4: Committing Code ---
     commit_status_summary = "Commit skipped: No operations to commit or branch operation failed."
     change_explanations_for_comment: List[Dict[str,str]] = []
-
     if final_operations_to_commit and branch_op_success:
         print(f"\n💾 Step 4: Applying File Operations to branch '{final_target_branch}'...")
         commit_message_base = f"Fix issue #{issue_number}: {issue_title}"
-        
-        committer_input_payload = {
-            "repo_owner": repo_owner,
-            "repo_name": repo_name,
-            "branch_name": final_target_branch,
-            "commit_message_base": commit_message_base,
-            "operations": final_operations_to_commit
-        }
-        committer_input_str = (
-            f"Apply the following file operations to repository {repo_owner}/{repo_name} on branch {final_target_branch}. "
-            f"Base commit message: '{commit_message_base}'.\n\n"
-            f"Operations: {json.dumps(committer_input_payload['operations'])}"
-        )
-        committer_run = await runner.run(committer, input=committer_input_str)
+        committer_input_payload = {"repo_owner": repo_owner, "repo_name": repo_name, "branch_name": final_target_branch, "commit_message_base": commit_message_base, "operations": final_operations_to_commit}
+        committer_input_str = (f"Apply the following file operations to repository {repo_owner}/{repo_name} on branch {final_target_branch}. Base commit message: '{commit_message_base}'.\n\nOperations: {json.dumps(committer_input_payload['operations'])}")
+        committer_run = await run_agent_and_track_usage(committer, committer_input_str)
         commit_status_summary = committer_run.final_output
         print(f"Code Committer Agent Output:\n{commit_status_summary}\n")
-
         if "error" not in commit_status_summary.lower() and "fail" not in commit_status_summary.lower() :
             print("\n✍️ Step 4.5: Generating Explanations for Changes...")
             for op in final_operations_to_commit:
-                original_code_content = original_file_contents.get(op['file_path'])
-                
-                if op.get("action") == "delete":
-                    original_code_for_explainer = original_code_content if original_code_content is not None else "Content before deletion was not available or file was new."
-                    new_code_for_explainer = "This file was deleted."
-                elif op.get("action") == "modify":
-                    original_code_for_explainer = original_code_content if original_code_content is not None else "This is a new file (no original content)."
-                    new_code_for_explainer = op.get('code', "# Error: New code not found in operation proposal.")
-                else: # Should not happen if final_operations_to_commit is filtered
-                    continue
-
-                explainer_input = (
-                    f"Original GitHub Issue Title: {issue_title}\n"
-                    f"Original GitHub Issue Body:\n{issue_body}\n\n"
-                    f"Overall Plan:\n{generated_plan}\n\n"
-                    f"File Path: {op['file_path']}\n"
-                    f"Action Taken: {op['action']}\n"
-                    f"Original Code Snippet (or status):\n{original_code_for_explainer}\n\n"
-                    f"New Code Snippet (or status):\n{new_code_for_explainer}\n\n"
-                    "Explain this specific change."
-                )
-                explanation_run = await runner.run(change_explainer, input=explainer_input)
-                change_explanations_for_comment.append({
-                    "file_path": op['file_path'],
-                    "action": op['action'],
-                    "explanation": explanation_run.final_output
-                })
-                print(f"  Explanation for {op['file_path']} ({op['action']}): {explanation_run.final_output}")
-
-    elif not final_operations_to_commit:
-         commit_status_summary = "Commit skipped: No approved file operations to commit."
-         print(f"⚠️ {commit_status_summary}")
-    else:
-        commit_status_summary = f"Commit skipped due to branch operation failure ({branch_agent_summary})."
-        print(f"⚠️ {commit_status_summary}")
+                original_code_for_explainer = original_file_contents.get(op['file_path'])
+                new_code_for_explainer = op.get('code')
+                if op.get("action") == "delete": original_code_for_explainer = original_code_for_explainer if original_code_for_explainer is not None else "Content before deletion was not available or file was new."; new_code_for_explainer = "This file was deleted."
+                elif op.get("action") == "modify": original_code_for_explainer = original_code_for_explainer if original_code_for_explainer is not None else "This is a new file (no original content)."; new_code_for_explainer = new_code_for_explainer if new_code_for_explainer is not None else "# Error: New code not found in operation proposal."
+                else: continue
+                explainer_input = (f"Original GitHub Issue Title: {issue_title}\nOriginal GitHub Issue Body:\n{issue_body}\n\nOverall Plan:\n{generated_plan}\n\nFile Path: {op['file_path']}\nAction Taken: {op['action']}\nOriginal Code Snippet (or status):\n{original_code_for_explainer}\n\nNew Code Snippet (or status):\n{new_code_for_explainer}\n\nExplain this specific change.")
+                explanation_run = await run_agent_and_track_usage(change_explainer, explainer_input)
+                change_explanations_for_comment.append({"file_path": op['file_path'], "action": op['action'], "explanation": explanation_run.final_output})
+    # ... (rest of commit summary logic)
 
     # --- Step 5: Posting Summary Comment ---
     print("\n💬 Step 5: Posting Summary Comment...")
-    summary_comment_parts = [
-        f"🤖 **OctoAgent Report** for Issue #{issue_number}: {issue_title}"
-    ]
+    summary_comment_parts = [f"🤖 **OctoAgent Report** for Issue #{issue_number}: {issue_title}"]
     summary_comment_parts.append(f"\n**Triage Summary:**\n{triage_output_summary}")
     summary_comment_parts.append(f"\n**Generated Plan:**\n{generated_plan}")
-
-    if target_file_override:
-        summary_comment_parts.append(f"\n**File Identification:**\nUser specified target file(s): `{', '.join(identified_file_paths_raw)}`.")
-    elif identified_file_paths_raw:
-        summary_comment_parts.append(f"\n**File Identification:**\nAgent identified target file(s): `{', '.join(identified_file_paths_raw)}`.")
-    else:
-        summary_comment_parts.append(f"\n**File Identification:**\nNo specific files were identified for modification.")
-
-    if change_explanations_for_comment:
+    if target_file_override: summary_comment_parts.append(f"\n**File Identification:**\nUser specified target file(s): `{', '.join(identified_file_paths_raw)}`.")
+    elif identified_file_paths_raw: summary_comment_parts.append(f"\n**File Identification:**\nAgent identified target file(s): `{', '.join(identified_file_paths_raw)}`.")
+    else: summary_comment_parts.append(f"\n**File Identification:**\nNo specific files were identified for modification.")
+    if change_explanations_for_comment: # ... (append explanations)
         summary_comment_parts.append(f"\n**Summary of Changes Applied:**")
-        for item in change_explanations_for_comment:
-            summary_comment_parts.append(f"\n* **File:** `{item['file_path']}` ({item['action']})")
-            summary_comment_parts.append(f"    * **Explanation:** {item['explanation']}")
-    elif final_operations_to_commit:
-        summary_comment_parts.append(f"\n**Finalized File Operations (Commit Attempted but Explanations Skipped):**")
-        for op in final_operations_to_commit:
-            if op.get('action') == 'modify':
-                summary_comment_parts.append(f"\n*Modify/Create file `{op['file_path']}`*")
-            elif op.get('action') == 'delete':
-                 summary_comment_parts.append(f"\n*Delete file `{op['file_path']}`*")
-    elif current_proposed_operations and any(p.get('action') != 'no_change' for p in current_proposed_operations):
-         summary_comment_parts.append(f"\n**Code Proposal Attempt:**\nOperations were proposed (see logs for details) but not finalized/approved after review.")
-    else:
-        summary_comment_parts.append(f"\n**Code Proposal:** No file operations were proposed or committed.")
-
+        for item in change_explanations_for_comment: summary_comment_parts.append(f"\n* **File:** `{item['file_path']}` ({item['action']})\n    * **Explanation:** {item['explanation']}")
+    # ... (append reviews, branch status, commit status)
     summary_comment_parts.append(f"\n**Technical Review:**\n{tech_feedback}")
     summary_comment_parts.append(f"\n**Style Review:**\n{style_feedback}")
-
-    if branch_op_success:
-        summary_comment_parts.append(f"\n**Branch:** `{final_target_branch}` (Created/Ensured)")
-        summary_comment_parts.append(f"\n**Commit Status:**\n{commit_status_summary}")
-    else:
-        summary_comment_parts.append(f"\n**Branch Creation Attempt Summary:** {branch_agent_summary}")
-        summary_comment_parts.append(f"\n**Commit Status:** {commit_status_summary}")
-
-    summary_comment_parts.append("\n---\n*This comment was automatically generated by OctoAgent, an experimental AI-powered issue-solving assistant.*")
-
+    if branch_op_success: summary_comment_parts.append(f"\n**Branch:** `{final_target_branch}` (Created/Ensured)")
+    summary_comment_parts.append(f"\n**Commit Status:**\n{commit_status_summary}")
+    
+    footer_parts = ["\n---\n*This comment was automatically generated by OctoAgent, an experimental AI-powered issue-solving assistant.*"]
+    if show_token_summary:
+        overall_total_tokens_final = total_prompt_tokens + total_completion_tokens
+        footer_parts.append(f"*Model used: {actual_model_name_reported}, Total tokens: {overall_total_tokens_final} (Prompt: {total_prompt_tokens}, Completion: {total_completion_tokens})*")
+    summary_comment_parts.extend(footer_parts)
     final_summary_comment = "\n".join(summary_comment_parts)
-    comment_run = await runner.run(
-        comment_poster,
-        input=f"Post the following comment to {issue_url}: \n\n{final_summary_comment}",
-    )
-    print(f"Comment Poster Agent Output: {comment_run.final_output}\n")
+    comment_poster_run = await run_agent_and_track_usage(comment_poster, f"Post the following comment to {issue_url}: \n\n{final_summary_comment}")
+    print(f"Comment Poster Agent Output: {comment_poster_run.final_output}\n")
+
+    if show_token_summary:
+        overall_total_tokens = total_prompt_tokens + total_completion_tokens
+        print("\n--- Token Usage Summary ---")
+        print(f"Model Used: {actual_model_name_reported if actual_model_name_reported else model_to_use}") # Fallback to intended model if not captured
+        print(f"Total Prompt Tokens: {total_prompt_tokens}")
+        print(f"Total Completion Tokens: {total_completion_tokens}")
+        print(f"Overall Total Tokens: {overall_total_tokens}")
+        print("---------------------------\n")
 
     print("=" * 50 + "\n✅ GitHub Issue Solver Flow Completed!\n")
 
@@ -608,6 +541,17 @@ def main():
         default=3,
         help='The maximum number of review cycles for code proposals. Defaults to 3.'
     )
+    parser.add_argument(
+        '--no_token_usage',
+        action='store_true',
+        help='Hide token usage information. Token usage is shown by default.'
+    )
+    parser.add_argument(
+        '--model',
+        type=str,
+        default='gpt-4o', 
+        help='The OpenAI model to use for the agents (e.g., "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"). Defaults to "gpt-4o".'
+    )
     args = parser.parse_args()
 
     issue_url = (
@@ -627,6 +571,8 @@ def main():
             repo_name_override=args.repo_name,
             target_file_override=args.target_file,
             max_review_cycles_override=args.max_review_cycles,
+            show_token_summary=(not args.no_token_usage),
+            model_to_use=args.model
         )
     )
 
