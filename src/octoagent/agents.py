@@ -156,43 +156,39 @@ class FileIdentifierAgent(ReusableAgent):
         )
 
 class CodeProposerAgent(ReusableAgent):
-    """An agent that proposes code solutions, expecting original content for modifications."""
+    """An agent that proposes code solutions, expecting original content for modifications,
+    and outputting the full modified file content."""
     def __init__(self, **kwargs):
         super().__init__(
             name="CodeProposer",
             instructions=(
                 "You are an expert software developer. You will be given GitHub issue details, an overall plan, "
-                "a list of relevant file paths, and for each file path to be modified, its original content (or 'None' if it's a new file).\n"
-                "Your task is to propose all necessary file operations (creations, modifications, deletions).\n\n"
-                "**Core Task & Output Format:**\n"
-                "For each file path provided in 'Relevant File Paths Identified':\n"
-                "1.  **Analyze Intent & Original Content:** Determine if the goal is to add new functionality, "
-                "modify existing functionality, create a new file, or delete an old file (e.g., for a rename). "
-                "Refer to the provided original content for existing files.\n"
-                "2.  **Integrate Changes Carefully:**\n"
-                "    * **Additive Changes:** If the issue/plan asks to 'add' new functionality to an existing file, "
-                "your primary goal is to introduce this new code into the provided original content while "
-                "**preserving all existing, unrelated code and structures.** "
-                "Do not remove or refactor existing code unless explicitly requested.\n"
-                "    * **Modifications to Existing Code:** When modifying existing code, integrate your changes precisely "
-                "into the provided original content, preserving unchanged parts.\n"
-                "3.  **State Assumptions:** If the issue or plan is vague, make a reasonable, simple choice for the "
+                "a list of relevant file paths, and for each of these files, its **original content** (or a note if it's a new file or content couldn't be fetched).\n"
+                "Your task is to propose all necessary file operations.\n\n"
+                "**VERY IMPORTANT - HOW TO MODIFY EXISTING FILES:**\n"
+                "If a file is being modified (meaning 'Original content for `filename.ext`:' is provided and is not empty or indicating a new file):\n"
+                "1. You are given the **entire original content** of that file.\n"
+                "2. You MUST determine where your new code (e.g., a new function, a fix to an existing line) should be placed within that original content.\n"
+                "3. Your output for that file MUST be the **ENTIRE, COMPLETE, MODIFIED content of the file.** This means you include ALL of the original, unchanged code, plus your additions/modifications in the correct places. \n"
+                "   For example, if original content is `def func_a():\n  pass` and you need to add `func_b`, your output for that file should be something like:\n"
+                "   `def func_a():\n  pass\n\ndef func_b():\n  # new code here\n`\n"
+                "   **DO NOT output only the new function or the changed lines. Output the WHOLE file's new content.**\n\n"
+                "**For NEW files** (where 'Original content for `filename.ext`:' indicates it's new or content wasn't available):\n"
+                "- Generate the complete initial content for this new file.\n\n"
+                "**Assumptions:** If the issue or plan is vague, make a reasonable, simple choice for the "
                 "implementation and **explicitly state your choice and any assumptions made in a section titled 'Assumptions Made:'** "
-                "before presenting file operations.\n"
-                "4.  **Output Operations Clearly (after stating assumptions, if any):**\n"
-                "    * **To Modify/Create a File:** State 'Changes for `path/to/file.ext`:' "
-                "followed by the **ENTIRE new file content** in a single markdown code block "
+                "before presenting any file operations.\n\n"
+                "**Output Operations (after 'Assumptions Made:' section, if any):**\n"
+                "- **To Modify/Create a File:** State 'Changes for `path/to/file.ext`:' "
+                "followed by the **ENTIRE NEW FILE CONTENT** (as described above) in a single markdown code block "
                 "with the appropriate language identifier.\n"
-                "    * **To Delete a File:** State 'Delete file: `path/to/file.ext`'. "
-                "(Do not provide a code block for deletions).\n"
-                "    * **For No Change:** If a file needs no changes, state 'No changes needed for `path/to/file.ext`.'\n"
-                "Ensure your response lists all intended operations. If revising based on feedback, "
-                "address the feedback specifically for the indicated files/operations, using the initially provided original content as your base for modifications."
+                "- **To Delete a File:** State 'Delete file: `path/to/file.ext`'.\n"
+                "- **For No Change:** If a file needs no changes, state 'No changes needed for `path/to/file.ext`.'\n\n"
+                "Ensure your response clearly lists all intended operations for all relevant files. "
+                "If revising based on feedback, re-apply the same principles using the original content as your base."
             ),
-            # No 'get_file_content' tool needed anymore, orchestrator will provide content
             **kwargs
         )
-
 
 class ChangeExplainerAgent(ReusableAgent):
     """An agent that explains code changes."""

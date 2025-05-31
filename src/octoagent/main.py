@@ -68,66 +68,113 @@ async def solve_github_issue_flow(
     target_file_override: Optional[str] = None,
     max_review_cycles_override: int = 3,
     show_token_summary: bool = True,
-    model_to_use: str = "gpt-4o", # Default model
+    model_to_use: str = "gpt-4o",
 ):
     """
     Orchestrates the end-to-end flow of agents to solve a GitHub issue.
-
-    Parameters
-    ----------
-    issue_url : str
-        The full URL of the GitHub issue to be solved.
-    repo_owner_override : str, optional
-        The GitHub repository owner. If not provided, it's parsed from the URL.
-    repo_name_override : str, optional
-        The GitHub repository name. If not provided, it's parsed from the URL.
-    target_file_override : str, optional
-        If provided, this comma-separated string of file paths will be used
-        directly, skipping the FileIdentifierAgent step. Defaults to None.
-    max_review_cycles_override : int, optional
-        The maximum number of review cycles for code proposals. Defaults to 3.
-    model_to_use : str, optional
-        The OpenAI model to be used by the agents. Defaults to "gpt-4o".
-    show_token_summary : bool, optional
-        Whether to display a summary of token usage. Defaults to True.
     """
     print(f"\n🚀 Starting GitHub Issue Solver for: {issue_url}\n" + "=" * 50)
-    print(f"Using model: {model_to_use}")
+    print(f"Using model for agent instantiations: {model_to_use}")
 
     total_prompt_tokens = 0
     total_completion_tokens = 0
-    # Initialize with the model intended to be used; will be updated if API response differs
     actual_model_name_reported = model_to_use 
 
     runner = Runner()
 
     async def run_agent_and_track_usage(agent_instance, input_text, **kwargs):
         nonlocal total_prompt_tokens, total_completion_tokens, actual_model_name_reported
-        # The agent_instance is already configured with the model via its constructor
+        agent_name_for_log = agent_instance.name if hasattr(agent_instance, 'name') else "UnknownAgent"
+        print(f"DEBUG: Running agent: {agent_name_for_log}, Input (first 100 chars): {input_text[:100]}...")
         run_result = await runner.run(agent_instance, input=input_text, **kwargs)
         
-        if hasattr(run_result, 'new_items') and run_result.new_items:
-            for item in run_result.new_items:
-                usage_data = None
-                model_from_response = None
-                # Check for raw_item, typical for direct OpenAI API responses via the agents library
-                if hasattr(item, 'raw_item') and isinstance(getattr(item, 'raw_item'), dict):
-                    raw_item_dict = getattr(item, 'raw_item')
-                    usage_data = raw_item_dict.get('usage')
-                    model_from_response = raw_item_dict.get('model')
-                # Fallback if usage/model is directly on the item (less common for raw API data)
-                elif hasattr(item, 'usage') and isinstance(getattr(item, 'usage'), dict):
-                    usage_data = getattr(item, 'usage')
-                    if hasattr(item, 'model'): # or item.model_name etc.
-                         model_from_response = getattr(item, 'model')
-                
-                if model_from_response and (actual_model_name_reported == model_to_use or actual_model_name_reported == "Unknown"):
-                    # Update with the model name actually reported by the API for the first successful call
-                    actual_model_name_reported = model_from_response
+        direct_usage_data = None
+        direct_model_from_response = None
 
-                if usage_data and isinstance(usage_data, dict):
-                    total_prompt_tokens += usage_data.get("prompt_tokens", 0)
-                    total_completion_tokens += usage_data.get("completion_tokens", 0)
+        if hasattr(run_result, 'raw_response') and run_result.raw_response is not None:
+            print(f"DEBUG: [{agent_name_for_log}] RunResult has 'raw_response'. Type: {type(run_result.raw_response)}")
+            response_obj = run_result.raw_response
+            if hasattr(response_obj, 'usage') and getattr(response_obj, 'usage') is not None:
+                direct_usage_data = response_obj.usage
+            if hasattr(response_obj, 'model') and isinstance(getattr(response_obj, 'model'), str):
+                direct_model_from_response = response_obj.model
+        
+        if direct_usage_data:
+            prompt_tokens_val = 0
+            completion_tokens_val = 0
+            if isinstance(direct_usage_data, dict):
+                prompt_tokens_val = direct_usage_data.get("prompt_tokens", 0)
+                completion_tokens_val = direct_usage_data.get("completion_tokens", 0)
+                print(f"DEBUG: [{agent_name_for_log}] Usage from RunResult.raw_response (dict): P={prompt_tokens_val}, C={completion_tokens_val}")
+            elif hasattr(direct_usage_data, 'prompt_tokens') and hasattr(direct_usage_data, 'completion_tokens'):
+                prompt_tokens_val = getattr(direct_usage_data, "prompt_tokens", 0)
+                completion_tokens_val = getattr(direct_usage_data, "completion_tokens", 0)
+                print(f"DEBUG: [{agent_name_for_log}] Usage from RunResult.raw_response (object): P={prompt_tokens_val}, C={completion_tokens_val}")
+
+            if isinstance(prompt_tokens_val, int) and isinstance(completion_tokens_val, int):
+                total_prompt_tokens += prompt_tokens_val
+                total_completion_tokens += completion_tokens_val
+        
+        if direct_model_from_response and (actual_model_name_reported == model_to_use or actual_model_name_reported == "Unknown" or actual_model_name_reported != direct_model_from_response):
+            actual_model_name_reported = direct_model_from_response
+            print(f"DEBUG: [{agent_name_for_log}] Model from RunResult.raw_response: {actual_model_name_reported}")
+
+        if (not direct_usage_data or (total_prompt_tokens == 0 and total_completion_tokens == 0)) and \
+           hasattr(run_result, 'new_items') and run_result.new_items:
+             print(f"DEBUG: [{agent_name_for_log}] Token usage not found on RunResult directly or was zero. Iterating {len(run_result.new_items)} new_items.")
+             for i, item in enumerate(run_result.new_items):
+                print(f"DEBUG: [{agent_name_for_log}] Item {i} type: {type(item)}")
+                if not isinstance(item, (str, int, float, bool, list, dict)) and item is not None:
+                    try: print(f"DEBUG: [{agent_name_for_log}] Item {i} dir(): {dir(item)}")
+                    except: pass
+                
+                raw_api_response_object = None
+                item_usage_data = None
+                item_model_from_response = None
+
+                if hasattr(item, 'raw_item'):
+                    raw_api_response_object = getattr(item, 'raw_item')
+                    print(f"DEBUG: [{agent_name_for_log}] Item {i} has raw_item. Type: {type(raw_api_response_object)}")
+                    
+                    if hasattr(raw_api_response_object, 'usage') and getattr(raw_api_response_object, 'usage') is not None and \
+                       hasattr(raw_api_response_object, 'model') and getattr(raw_api_response_object, 'model') is not None:
+                        usage_attr = raw_api_response_object.usage
+                        item_model_from_response = raw_api_response_object.model
+                        print(f"DEBUG: [{agent_name_for_log}] Extracted from raw_item attributes: model='{item_model_from_response}', usage_obj='{usage_attr}'")
+                        if hasattr(usage_attr, 'prompt_tokens') and hasattr(usage_attr, 'completion_tokens'):
+                             item_usage_data = {"prompt_tokens": getattr(usage_attr, "prompt_tokens", 0), "completion_tokens": getattr(usage_attr, "completion_tokens", 0)}
+                        elif isinstance(usage_attr, dict): item_usage_data = usage_attr
+                    elif isinstance(raw_api_response_object, dict):
+                        item_usage_data = raw_api_response_object.get('usage')
+                        item_model_from_response = raw_api_response_object.get('model')
+                        if item_usage_data: print(f"DEBUG: [{agent_name_for_log}] Found usage_data in raw_item dict: {item_usage_data}")
+                        if item_model_from_response: print(f"DEBUG: [{agent_name_for_log}] Found model in raw_item dict: {item_model_from_response}")
+                elif hasattr(item, 'usage') and isinstance(getattr(item, 'usage'), dict): # Fallback for item itself
+                    item_usage_data = getattr(item, 'usage')
+                    print(f"DEBUG: [{agent_name_for_log}] Item {i} has direct 'usage' attribute: {item_usage_data}")
+                    if hasattr(item, 'model') and isinstance(getattr(item, 'model'), str):
+                        item_model_from_response = getattr(item, 'model')
+                        print(f"DEBUG: [{agent_name_for_log}] Item {i} has direct 'model' attribute: {item_model_from_response}")
+
+
+                if item_model_from_response and (actual_model_name_reported == model_to_use or actual_model_name_reported == "Unknown" or actual_model_name_reported != item_model_from_response):
+                    actual_model_name_reported = item_model_from_response
+                    print(f"DEBUG: [{agent_name_for_log}] Updated actual_model_name_reported to '{actual_model_name_reported}' from item.")
+                
+                if item_usage_data and isinstance(item_usage_data, dict):
+                    prompt_tokens = item_usage_data.get("prompt_tokens", 0)
+                    completion_tokens = item_usage_data.get("completion_tokens", 0)
+                    if isinstance(prompt_tokens, int) and isinstance(completion_tokens, int) and (prompt_tokens > 0 or completion_tokens > 0):
+                        print(f"DEBUG: [{agent_name_for_log}] Accumulating tokens: Prompt={prompt_tokens}, Completion={completion_tokens}")
+                        total_prompt_tokens += prompt_tokens
+                        total_completion_tokens += completion_tokens
+                        break 
+                    else: print(f"DEBUG: [{agent_name_for_log}] item_usage_data found but tokens are zero, missing, or not integers: {item_usage_data}")
+                if not (total_prompt_tokens > 0 or total_completion_tokens > 0): # check if any tokens were added in this specific run_result
+                    print(f"DEBUG: [{agent_name_for_log}] After iterating new_items, still no token usage found for this agent run.")
+        elif not direct_usage_data: # If no run_result.usage and no new_items
+             print(f"DEBUG: [{agent_name_for_log}] No RunResult.usage, and no new_items in run_result or new_items is empty.")
+            
         return run_result
 
     repo_owner = repo_owner_override
@@ -159,7 +206,6 @@ async def solve_github_issue_flow(
         return
     print(f"Default branch is '{default_branch_name}'.\n")
 
-    # Instantiate agents with the chosen model
     triager = IssueTriagerAgent(model=model_to_use)
     planner = PlannerAgent(model=model_to_use)
     file_identifier = FileIdentifierAgent(model=model_to_use)
@@ -201,16 +247,21 @@ async def solve_github_issue_flow(
                                     break
                             except json.JSONDecodeError: pass 
         if not issue_details_from_tool:
-            print(f"❌ Error: Could not get structured issue details from triage step. Last agent output: {triage_output_summary}")
-            if show_token_summary:
-                overall_total_tokens_err = total_prompt_tokens + total_completion_tokens
-                print("\n--- Token Usage Summary (Partial) ---")
-                print(f"Model Used: {actual_model_name_reported}")
-                print(f"Total Prompt Tokens: {total_prompt_tokens}")
-                print(f"Total Completion Tokens: {total_completion_tokens}")
-                print(f"Overall Total Tokens: {overall_total_tokens_err}")
-                print("-------------------------------------\n")
-            return
+            try: 
+                potential_details = json.loads(triage_output_summary) 
+                if isinstance(potential_details, dict) and 'number' in potential_details:
+                    issue_details_from_tool = potential_details
+            except (json.JSONDecodeError, TypeError):
+                print(f"❌ Error: Could not get structured issue details from triage step. Last agent output: {triage_output_summary}")
+                if show_token_summary:
+                    overall_total_tokens_err = total_prompt_tokens + total_completion_tokens
+                    print("\n--- Token Usage Summary (Partial) ---")
+                    print(f"Model Used: {actual_model_name_reported}")
+                    print(f"Total Prompt Tokens: {total_prompt_tokens}")
+                    print(f"Total Completion Tokens: {total_completion_tokens}")
+                    print(f"Overall Total Tokens: {overall_total_tokens_err}")
+                    print("-------------------------------------\n")
+                return
 
     issue_number = issue_details_from_tool.get("number")
     issue_title = issue_details_from_tool.get("title", "Unknown Title")
@@ -220,7 +271,7 @@ async def solve_github_issue_flow(
 
     if not issue_number:
         print("❌ Error: Issue number not found in triaged details.")
-        if show_token_summary:
+        if show_token_summary: 
             overall_total_tokens_err = total_prompt_tokens + total_completion_tokens
             print("\n--- Token Usage Summary (Partial) ---")
             print(f"Model Used: {actual_model_name_reported}")
@@ -309,14 +360,9 @@ async def solve_github_issue_flow(
             content_data = await github_client.get_file_content_from_repo(repo_owner, repo_name, fp, default_branch_name)
             if content_data and content_data.get("status") == "success":
                 original_file_contents[fp] = content_data["content"]
-                print(f"  Successfully fetched content for {fp}")
-            else:
-                original_file_contents[fp] = None 
-                status_msg = content_data.get('status', 'unknown') if content_data else 'no_response'
-                error_msg = content_data.get('error_message', content_data.get('error', 'Unknown reason')) if content_data else 'No data'
-                print(f"  ⚠️ Could not fetch content for {fp} (status: {status_msg}, reason: {error_msg}). Assuming it's a new file or path for deletion.")
+            else: original_file_contents[fp] = None 
         print("\n")
-    
+
     # --- Step 2: Propose Initial File Operations ---
     current_proposed_operations: List[Dict[str, str]] = []
     proposer_input_parts = [
@@ -330,10 +376,8 @@ async def solve_github_issue_flow(
     ]
     for fp in identified_file_paths_raw: 
         content = original_file_contents.get(fp)
-        if content is not None:
-            proposer_input_parts.append(f"Original content for `{fp}`:\n```\n{content}\n```\n")
-        else:
-            proposer_input_parts.append(f"Original content for `{fp}`: This file is new, could not be fetched, or is intended for deletion based on plan.\n")
+        if content is not None: proposer_input_parts.append(f"Original content for `{fp}`:\n```\n{content}\n```\n")
+        else: proposer_input_parts.append(f"Original content for `{fp}`: This file is new, could not be fetched, or is intended for deletion based on plan.\n")
     proposer_input_parts.append(
         "For each operation:\n"
         "- If creating or modifying a file: State 'Changes for `path/to/file.ext`:' followed by the COMPLETE NEW file content in a markdown block.\n"
@@ -369,14 +413,11 @@ async def solve_github_issue_flow(
                 f"Overall Plan:\n{generated_plan}\n\nProposed File Operations:"
             ]
             has_operations_to_review = False
-            for op in temp_proposed_operations:
-                if op.get('action') == 'modify':
-                    review_input_parts.append(f"\n--- Modify/Create File: `{op['file_path']}` ---\n```\n{op['code']}\n```"); has_operations_to_review = True
-                elif op.get('action') == 'delete':
-                    review_input_parts.append(f"\n--- Delete File: `{op['file_path']}` ---"); has_operations_to_review = True
+            for op in temp_proposed_operations: 
+                if op.get('action') == 'modify': review_input_parts.append(f"\n--- Modify/Create File: `{op['file_path']}` ---\n```\n{op['code']}\n```"); has_operations_to_review = True
+                elif op.get('action') == 'delete': review_input_parts.append(f"\n--- Delete File: `{op['file_path']}` ---"); has_operations_to_review = True
                 else: review_input_parts.append(f"\n--- File: `{op['file_path']}` ---\nNo changes proposed.")
-            if not has_operations_to_review: 
-                final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']; break
+            if not has_operations_to_review: final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']; break
             review_task_input = "\n".join(review_input_parts)
             print("🕵️‍♂️ Requesting Technical Review...")
             technical_review_run = await run_agent_and_track_usage(technical_reviewer, review_task_input)
@@ -386,15 +427,14 @@ async def solve_github_issue_flow(
             style_feedback = style_review_run.final_output; print(f"Style Reviewer Output:\n{style_feedback}\n")
             tech_ok = any(s in tech_feedback.lower() for s in ["lgtm", "satisfactory", "approved"])
             style_ok = any(s in style_feedback.lower() for s in ["lgtm", "satisfactory", "approved"])
-            if tech_ok and style_ok:
-                final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']; break
-            if cycle < max_review_cycles - 1:
+            if tech_ok and style_ok: final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']; break
+            if cycle < max_review_cycles_override - 1:
                 revision_proposer_input_parts = [
                     f"The following file operations for GitHub issue #{issue_number} ('{issue_title}') received feedback.",
                     f"Overall Plan:\n{generated_plan}\n",
                     "Current Proposed Operations (including original content for context if available):"
                 ]
-                for op in temp_proposed_operations:
+                for op in temp_proposed_operations: 
                     original_content_for_op = original_file_contents.get(op['file_path'], "This file may be new, or its original content was not fetched/available.")
                     if op.get('action') == 'modify': revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Modify/Create) ---\nOriginal Content (or status):\n```\n{original_content_for_op}\n```\nProposed Code:\n```\n{op['code']}\n```")
                     elif op.get('action') == 'delete': revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Delete) ---\nOriginal Content (or status):\n```\n{original_content_for_op}\n```\n")
@@ -408,8 +448,8 @@ async def solve_github_issue_flow(
                     "- If a file no longer needs changes: State 'No changes needed for `path/to/file.ext`.'."
                     "If the issue is vague, make a reasonable choice for a simple implementation. Clearly state any assumptions made."
                 )
-                proposer_run = await run_agent_and_track_usage(code_proposer, "\n".join(revision_proposer_input_parts))
-                revised_solution_markdown = proposer_run.final_output
+                proposer_run_revised = await run_agent_and_track_usage(code_proposer, "\n".join(revision_proposer_input_parts))
+                revised_solution_markdown = proposer_run_revised.final_output
                 print(f"DEBUG: Code Proposer Revised Raw Output:\n---\n{revised_solution_markdown}\n---\n")
                 revised_operations = parse_file_operations(revised_solution_markdown)
                 if revised_operations: temp_proposed_operations = revised_operations
@@ -425,9 +465,8 @@ async def solve_github_issue_flow(
     elif any("chore" in label.lower() for label in issue_labels): branch_prefix = "chore"
     target_branch_name_ideal = f"{branch_prefix}/issue-{issue_number}"
     branch_run = await run_agent_and_track_usage(branch_creator, f"Ensure branch for {repo_owner}/{repo_name} issue {issue_number}, prefix {branch_prefix}, base {default_branch_name}.")
-    branch_agent_summary = branch_run.final_output
-    actual_branch_name_from_tool = target_branch_name_ideal; branch_op_success = False
-    new_items_branch_check = getattr(branch_run, 'new_items', None) # ... (Rest of branch creation logic)
+    branch_agent_summary = branch_run.final_output; actual_branch_name_from_tool = target_branch_name_ideal; branch_op_success = False
+    new_items_branch_check = getattr(branch_run, 'new_items', None)
     if new_items_branch_check:
         for _, item_br in enumerate(new_items_branch_check):
             if type(item_br).__name__ == 'ToolCallOutputItem': 
@@ -442,7 +481,7 @@ async def solve_github_issue_flow(
                         else: print(f"INFO: Branch '{actual_branch_name_from_tool}' creation/check successful.")
                     else: branch_agent_summary = content_br.get('error', branch_agent_summary) + f" (Tool Output: {content_br})"
                 break 
-    if not branch_op_success: # ... (Fallback logic)
+    if not branch_op_success:
         print(f"Branch Creator Agent Output (Summary): {branch_agent_summary}\n")
         if "error" not in branch_agent_summary.lower() and ("created" in branch_agent_summary.lower() or "exists" in branch_agent_summary.lower() or "successful" in branch_agent_summary.lower()):
             match_bn = re.search(r"(?:branch|')\s*`?([^'`]+)`?\s*(?:has been successfully created|already exists|creation/check successful)", branch_agent_summary, re.IGNORECASE)
@@ -473,8 +512,11 @@ async def solve_github_issue_flow(
                 explainer_input = (f"Original GitHub Issue Title: {issue_title}\nOriginal GitHub Issue Body:\n{issue_body}\n\nOverall Plan:\n{generated_plan}\n\nFile Path: {op['file_path']}\nAction Taken: {op['action']}\nOriginal Code Snippet (or status):\n{original_code_for_explainer}\n\nNew Code Snippet (or status):\n{new_code_for_explainer}\n\nExplain this specific change.")
                 explanation_run = await run_agent_and_track_usage(change_explainer, explainer_input)
                 change_explanations_for_comment.append({"file_path": op['file_path'], "action": op['action'], "explanation": explanation_run.final_output})
-    # ... (rest of commit summary logic)
-
+    elif not final_operations_to_commit:
+         commit_status_summary = "Commit skipped: No approved file operations to commit."
+    else:
+        commit_status_summary = f"Commit skipped due to branch operation failure ({branch_agent_summary})."
+    
     # --- Step 5: Posting Summary Comment ---
     print("\n💬 Step 5: Posting Summary Comment...")
     summary_comment_parts = [f"🤖 **OctoAgent Report** for Issue #{issue_number}: {issue_title}"]
@@ -483,10 +525,12 @@ async def solve_github_issue_flow(
     if target_file_override: summary_comment_parts.append(f"\n**File Identification:**\nUser specified target file(s): `{', '.join(identified_file_paths_raw)}`.")
     elif identified_file_paths_raw: summary_comment_parts.append(f"\n**File Identification:**\nAgent identified target file(s): `{', '.join(identified_file_paths_raw)}`.")
     else: summary_comment_parts.append(f"\n**File Identification:**\nNo specific files were identified for modification.")
-    if change_explanations_for_comment: # ... (append explanations)
+    if change_explanations_for_comment: 
         summary_comment_parts.append(f"\n**Summary of Changes Applied:**")
         for item in change_explanations_for_comment: summary_comment_parts.append(f"\n* **File:** `{item['file_path']}` ({item['action']})\n    * **Explanation:** {item['explanation']}")
-    # ... (append reviews, branch status, commit status)
+    elif final_operations_to_commit: summary_comment_parts.append(f"\n**Finalized File Operations (Commit Attempted but Explanations Skipped/Failed):**") 
+    elif current_proposed_operations and any(p.get('action') != 'no_change' for p in current_proposed_operations): summary_comment_parts.append(f"\n**Code Proposal Attempt:**\nOperations were proposed but not finalized.")
+    else: summary_comment_parts.append(f"\n**Code Proposal:** No file operations were proposed or committed.")
     summary_comment_parts.append(f"\n**Technical Review:**\n{tech_feedback}")
     summary_comment_parts.append(f"\n**Style Review:**\n{style_feedback}")
     if branch_op_success: summary_comment_parts.append(f"\n**Branch:** `{final_target_branch}` (Created/Ensured)")
@@ -504,7 +548,7 @@ async def solve_github_issue_flow(
     if show_token_summary:
         overall_total_tokens = total_prompt_tokens + total_completion_tokens
         print("\n--- Token Usage Summary ---")
-        print(f"Model Used: {actual_model_name_reported if actual_model_name_reported else model_to_use}") # Fallback to intended model if not captured
+        print(f"Model Used: {actual_model_name_reported if actual_model_name_reported and actual_model_name_reported != model_to_use else model_to_use}")
         print(f"Total Prompt Tokens: {total_prompt_tokens}")
         print(f"Total Completion Tokens: {total_completion_tokens}")
         print(f"Overall Total Tokens: {overall_total_tokens}")
@@ -586,3 +630,4 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
 
     main()
+    
