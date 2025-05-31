@@ -8,11 +8,12 @@ from agents import Runner, ToolCallItem, ToolCallOutputItem
 from .agents import (
     BranchCreatorAgent,
     CodeCommitterAgent,
-    CodeProposerAgent,
+    CodeProposerAgent, # Ensure this is imported
     CodeReviewerAgent,
     CommentPosterAgent,
     IssueTriagerAgent,
     FileIdentifierAgent,
+    PlannerAgent,      # Ensure this is imported
 )
 from .github_client import GitHubClient
 from .tools import extract_code_from_markdown, parse_github_issue_url
@@ -30,10 +31,10 @@ async def solve_github_issue_flow(
 
     This function coordinates a sequence of agents to perform the following steps:
     1.  Triage the issue to understand its details.
+    1.5. Generate a high-level plan to address the issue.
     2.  Identify the target file to be fixed (or use a user-provided override).
     3.  Propose a code solution.
-    4.  Review the proposed code for technical correctness and style (up to a
-        configurable number of cycles).
+    4.  Review the proposed code for technical correctness and style.
     5.  Create a new branch for the fix.
     6.  Commit the finalized code to the new branch.
     7.  Post a summary comment on the original GitHub issue.
@@ -79,8 +80,9 @@ async def solve_github_issue_flow(
 
 
     triager = IssueTriagerAgent()
+    planner = PlannerAgent()
     file_identifier = FileIdentifierAgent()
-    code_proposer = CodeProposerAgent()
+    code_proposer = CodeProposerAgent() # This line was missing in the previous full example.
     technical_reviewer = CodeReviewerAgent(
         review_aspect="technical correctness and efficiency"
     )
@@ -186,6 +188,20 @@ async def solve_github_issue_flow(
         return
     print(f"Successfully processed issue #{issue_number}: '{issue_title}'")
 
+    # --- Step 1.2: Generating Plan ---
+    print(f"\n📝 Step 1.2: Generating Plan for issue #{issue_number}...")
+    planner_input = (
+        f"Based on the following triaged GitHub issue, create a step-by-step plan for resolution:\n"
+        f"Issue Title: {issue_title}\n"
+        f"Issue Body:\n{issue_body}\n\n"
+        f"Labels: {', '.join(issue_labels)}\n"
+        f"Triage Summary:\n{triage_output_summary}\n"
+    )
+    planner_run = await runner.run(planner, input=planner_input)
+    generated_plan = planner_run.final_output
+    print(f"Generated Plan:\n{generated_plan}\n")
+
+
     # --- Step 1.5: Identify Target File or Use Override ---
     target_file_path: Optional[str] = None
     if target_file_override:
@@ -200,6 +216,7 @@ async def solve_github_issue_flow(
             f"Issue Title: {issue_title}\n"
             f"Issue Body:\n{issue_body}\n\n"
             f"Labels: {', '.join(issue_labels)}\n"
+            f"Overall Plan: {generated_plan}\n"
         )
         identifier_run = await runner.run(file_identifier, input=identifier_input)
         target_file_path = identifier_run.final_output.strip()
@@ -212,7 +229,8 @@ async def solve_github_issue_flow(
     # --- Step 2: Propose Initial Code Solution ---
     print(f"\n💡 Step 2: Proposing Initial Code Solution for issue #{issue_number}...")
     proposer_input = (
-        f"Based on the following GitHub issue, please propose a code solution.\n"
+        f"Based on the following GitHub issue, and the overall plan, please propose a code solution.\n"
+        f"Overall Plan:\n{generated_plan}\n\n"
         f"Issue Title: {issue_title}\n"
         f"Issue Body:\n{issue_body}\n\n"
         f"Labels: {', '.join(issue_labels)}\n"
@@ -233,7 +251,7 @@ async def solve_github_issue_flow(
         current_proposed_code = None
 
     # --- Step 2.5: Review and Revision Loop ---
-    max_review_cycles = max_review_cycles_override # Use the override or default
+    max_review_cycles = max_review_cycles_override
     tech_feedback = "No feedback yet."
     style_feedback = "No feedback yet."
     solution_satisfactory = False
@@ -246,6 +264,7 @@ async def solve_github_issue_flow(
             review_task_input = (
                 f"Issue Title: {issue_title}\nIssue Number: {issue_number}\nIssue Body:\n{issue_body}\n\n"
                 f"Labels: {', '.join(issue_labels)}\n\n"
+                f"Overall Plan:\n{generated_plan}\n\n"
                 f"Proposed Solution Code (for file '{target_file_path}'):\n{final_code_to_commit}\n"
             )
 
@@ -285,6 +304,7 @@ async def solve_github_issue_flow(
                     f"It received the following feedback:\n"
                     f"Technical Review: {tech_feedback}\n"
                     f"Style Review: {style_feedback}\n\n"
+                    f"Remember the overall plan:\n{generated_plan}\n\n"
                     "Please provide a revised code solution addressing this feedback for the same target file. "
                     "Output only the new code block."
                 )
@@ -417,7 +437,7 @@ async def solve_github_issue_flow(
                 f"Code Content:\n{final_code_to_commit}"
             )
             committer_run = await runner.run(committer, input=committer_input)
-            commit_status_agent_summary = committer_run.final_output  # Agent's summary
+            commit_status_agent_summary = committer_run.final_output
             print(f"Code Committer Agent Output:\n{commit_status_agent_summary}\n")
 
             commit_tool_output_content = None
@@ -476,7 +496,7 @@ async def solve_github_issue_flow(
                 print(
                     f"ERROR: Commit tool reported error: {commit_tool_output_content.get('error')}"
                 )
-            else:  # If tool output wasn't clear, rely on agent's summary
+            else:
                 commit_status = commit_status_agent_summary
 
         else:
@@ -485,18 +505,19 @@ async def solve_github_issue_flow(
     else:
         print(f"⚠️ {commit_status}")
 
+
     # --- Step 5: Posting Summary Comment ---
     print("\n💬 Step 5: Posting Summary Comment...")
     summary_comment_parts = [
         f"🤖 **OctoAgent Report** for Issue #{issue_number}: {issue_title}"
     ]
     summary_comment_parts.append(f"\n**Triage Summary:**\n{triage_output_summary}")
+    summary_comment_parts.append(f"\n**Generated Plan:**\n{generated_plan}")
 
     if target_file_override:
         summary_comment_parts.append(f"\n**File Identification:**\nUser specified the target file: `{target_file_path}`.")
     else:
         summary_comment_parts.append(f"\n**File Identification:**\nAn agent identified `{target_file_path}` as the target file for the fix.")
-
 
     if proposed_solution_markdown:
         summary_comment_parts.append(
@@ -540,7 +561,7 @@ async def solve_github_issue_flow(
         )
         summary_comment_parts.append(
             f"\n**Code Commit Status:** {commit_status}"
-        )  # Reflect commit status even if branch failed
+        )
 
     summary_comment_parts.append("\n---\n*This comment was automatically generated by OctoAgent, an experimental AI-powered issue-solving assistant.*")
 

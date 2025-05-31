@@ -155,6 +155,26 @@ class CodeProposerAgent(ReusableAgent):
             **kwargs
         )
 
+class PlannerAgent(ReusableAgent):
+    """
+    An agent that analyzes a triaged GitHub issue and creates a
+    high-level, step-by-step plan to address it.
+    """
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="PlannerAgent",
+            instructions=(
+                "You are an expert software project planner. Based on the provided GitHub issue details "
+                "(title, body, labels, triage summary), your task is to create a concise, actionable, "
+                "step-by-step plan to guide the resolution of this issue. "
+                "The plan should outline the logical sequence of actions needed, such as "
+                "'1. Identify affected file(s).', '2. Draft code changes.', '3. Review solution.', etc. "
+                "Focus on a high-level strategy. Output the plan as a numbered list."
+            ),
+            # No specific tools needed for this initial version
+            **kwargs
+        )
+
 class CodeReviewerAgent(ReusableAgent):
     """
     An agent that reviews proposed code solutions.

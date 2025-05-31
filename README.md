@@ -130,7 +130,10 @@ For feature requests, please describe the problem you're trying to solve and you
 
 ## TODO
 
+Current wishlist (in no particular order of priority):
+
 - [x] Add NumPy style docstrings 
+- [ ] Introduce a "Planner Agent"
 - [ ] Add options to specify different provider and model 
 - [ ] Add more agentic features (e.g., handoffs)
 - [x] Improve logic to automatically determine target file
