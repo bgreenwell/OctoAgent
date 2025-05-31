@@ -2,21 +2,94 @@ import argparse
 import asyncio
 import os
 import sys
+import re
+import json
 from typing import Any, Dict, List, Optional
 
 from agents import Runner, ToolCallItem, ToolCallOutputItem
 from .agents import (
     BranchCreatorAgent,
     CodeCommitterAgent,
-    CodeProposerAgent, # Ensure this is imported
+    CodeProposerAgent,
     CodeReviewerAgent,
     CommentPosterAgent,
     IssueTriagerAgent,
     FileIdentifierAgent,
-    PlannerAgent,      # Ensure this is imported
+    PlannerAgent,
 )
 from .github_client import GitHubClient
 from .tools import extract_code_from_markdown, parse_github_issue_url
+
+
+def parse_file_operations(markdown_text: Optional[str]) -> List[Dict[str, str]]:
+    """
+    Parses the CodeProposerAgent's output for multiple file operations.
+
+    Expected formats:
+    Changes for `path/to/file1.py`:
+    (optional intermediary text)
+    ```python
+    # code for file1
+    ```
+    Delete file: `path/to/file2.py`
+    No changes needed for `path/to/file3.py`.
+
+    Returns
+    -------
+    list of dict
+        Each dict contains "file_path", "action" ('modify', 'delete', 'no_change'),
+        and "code" (if action is 'modify').
+    """
+    if not markdown_text:
+        return []
+
+    operations = []
+    # Regex for modifications/creations - updated to allow text between header and code block
+    modify_pattern = re.compile(
+        r"(?:### )?Changes for `([^`]+?\.[\w./-]+)`:.*?\s*```(?:[a-zA-Z0-9\+\-\#\.]*?)?\s*\n(.*?)\n```",
+        re.DOTALL | re.MULTILINE
+    )
+    # Regex for deletions
+    delete_pattern = re.compile(
+        r"Delete file: `([^`]+?\.[\w./-]+)`",
+        re.MULTILINE
+    )
+    # Regex for no changes
+    no_change_pattern = re.compile(
+        r"No changes needed for `([^`]+?\.[\w./-]+)`\.",
+        re.MULTILINE
+    )
+
+    all_matches = []
+    for match_type, pattern_obj in [("modify", modify_pattern), ("delete", delete_pattern), ("no_change", no_change_pattern)]:
+        for match in pattern_obj.finditer(markdown_text):
+            all_matches.append({"type": match_type, "match_obj": match, "start_pos": match.start()})
+
+    all_matches.sort(key=lambda x: x["start_pos"])
+
+    for item in all_matches:
+        match_type = item["type"]
+        match_obj = item["match_obj"]
+        if match_type == "modify":
+            file_path, code_content = match_obj.groups()
+            operations.append({
+                "file_path": file_path.strip(),
+                "code": code_content.strip(),
+                "action": "modify"
+            })
+        elif match_type == "delete":
+            file_path = match_obj.groups()[0]
+            operations.append({
+                "file_path": file_path.strip(),
+                "action": "delete"
+            })
+        elif match_type == "no_change":
+            file_path = match_obj.groups()[0]
+            operations.append({
+                "file_path": file_path.strip(),
+                "action": "no_change"
+            })
+    return operations
 
 
 async def solve_github_issue_flow(
@@ -28,16 +101,7 @@ async def solve_github_issue_flow(
 ):
     """
     Orchestrates the end-to-end flow of agents to solve a GitHub issue.
-
-    This function coordinates a sequence of agents to perform the following steps:
-    1.  Triage the issue to understand its details.
-    1.5. Generate a high-level plan to address the issue.
-    2.  Identify the target file to be fixed (or use a user-provided override).
-    3.  Propose a code solution.
-    4.  Review the proposed code for technical correctness and style.
-    5.  Create a new branch for the fix.
-    6.  Commit the finalized code to the new branch.
-    7.  Post a summary comment on the original GitHub issue.
+    Now handles multiple file identification, proposal, review, and commit.
 
     Parameters
     ----------
@@ -48,8 +112,8 @@ async def solve_github_issue_flow(
     repo_name_override : str, optional
         The GitHub repository name. If not provided, it's parsed from the URL.
     target_file_override : str, optional
-        If provided, this file path will be used directly, skipping the
-        FileIdentifierAgent step. Defaults to None.
+        If provided, this comma-separated string of file paths will be used
+        directly, skipping the FileIdentifierAgent step. Defaults to None.
     max_review_cycles_override : int, optional
         The maximum number of review cycles for code proposals. Defaults to 3.
     """
@@ -64,9 +128,7 @@ async def solve_github_issue_flow(
             repo_owner = repo_owner or parsed_info[0]
             repo_name = repo_name or parsed_info[1]
         else:
-            print(
-                f"❌ Error: Could not parse repository owner and name from issue URL: {issue_url}"
-            )
+            print(f"❌ Error: Could not parse repository owner and name from issue URL: {issue_url}")
             return
     print(f"Target Repository: {repo_owner}/{repo_name}")
 
@@ -78,14 +140,11 @@ async def solve_github_issue_flow(
         return
     print(f"Default branch is '{default_branch_name}'.\n")
 
-
     triager = IssueTriagerAgent()
     planner = PlannerAgent()
     file_identifier = FileIdentifierAgent()
-    code_proposer = CodeProposerAgent() # This line was missing in the previous full example.
-    technical_reviewer = CodeReviewerAgent(
-        review_aspect="technical correctness and efficiency"
-    )
+    code_proposer = CodeProposerAgent()
+    technical_reviewer = CodeReviewerAgent(review_aspect="technical correctness and efficiency")
     style_reviewer = CodeReviewerAgent(review_aspect="code style and readability")
     branch_creator = BranchCreatorAgent()
     committer = CodeCommitterAgent()
@@ -94,98 +153,32 @@ async def solve_github_issue_flow(
 
     # --- Step 1: Triaging Issue ---
     print("\n🔍 Step 1: Triaging Issue...")
-    triage_result_run = await runner.run(
-        triager, input=f"Please triage the GitHub issue at {issue_url}"
-    )
+    triage_result_run = await runner.run(triager, input=f"Please triage the GitHub issue at {issue_url}")
     triage_output_summary = triage_result_run.final_output
-    print(f"Triager Output Summary:\n{triage_output_summary}\n")
-
+    
     issue_details_from_tool: Optional[Dict[str, Any]] = None
-    tool_call_item_index_for_download = -1
-
     new_items_triage: Optional[List[Any]] = getattr(triage_result_run, "new_items", None)
     if new_items_triage:
-        for i, item in enumerate(new_items_triage):
-            item_type_name = type(item).__name__
-            is_tool_call_item = (
-                (ToolCallItem and isinstance(item, ToolCallItem))
-                or (item_type_name == "ToolCallItem")
-            )
-            if is_tool_call_item:
-                raw_item_from_tool_call = getattr(item, "raw_item", None)
-                current_tool_id = None
-                current_tool_name = None
-                if raw_item_from_tool_call:
-                    current_tool_id = getattr(raw_item_from_tool_call, "id", None)
-                    current_tool_name = getattr(raw_item_from_tool_call, "name", None)
-                    if not current_tool_name:
-                        tool_function_attr = getattr(
-                            raw_item_from_tool_call, "function", None
-                        )
-                        if tool_function_attr and hasattr(tool_function_attr, "name"):
-                            current_tool_name = getattr(tool_function_attr, "name", None)
-
-                if current_tool_name == "download_github_issue" and current_tool_id:
-                    tool_call_item_index_for_download = i
-                    break
-
-        if tool_call_item_index_for_download != -1 and (
-            tool_call_item_index_for_download + 1
-        ) < len(new_items_triage):
-            output_item_candidate = new_items_triage[
-                tool_call_item_index_for_download + 1
-            ]
-            output_item_type_name = type(output_item_candidate).__name__
-            is_tool_call_output_item = (
-                ToolCallOutputItem
-                and isinstance(output_item_candidate, ToolCallOutputItem)
-            ) or (output_item_type_name == "ToolCallOutputItem")
-            if is_tool_call_output_item:
-                content = getattr(output_item_candidate, "output", None)
-                if content is None:
-                    content = getattr(output_item_candidate, "content", None)
-                if content is None and hasattr(output_item_candidate, "raw_item"):
-                    raw_item_of_output = getattr(output_item_candidate, "raw_item")
-                    if isinstance(raw_item_of_output, dict):
-                        content = raw_item_of_output
-
-                if isinstance(content, dict):
+        for item in new_items_triage:
+            if type(item).__name__ == 'ToolCallOutputItem':
+                content = getattr(item, 'output', getattr(item, 'content', None))
+                if isinstance(content, dict) and 'number' in content:
                     issue_details_from_tool = content
-                elif isinstance(content, str):
-                    try:
-                        import json
-
-                        issue_details_from_tool = json.loads(content)
-                    except json.JSONDecodeError:
-                        issue_details_from_tool = {
-                            "error": "Failed to parse tool output JSON",
-                            "raw_content": content,
-                        }
-                else:
-                    issue_details_from_tool = {
-                        "error": f"Unexpected tool output type: {type(content)}",
-                        "raw_content": str(content),
-                    }
-
-    if not issue_details_from_tool or "error" in issue_details_from_tool:
-        print(
-            f"❌ Error: Could not retrieve valid issue details. Details: {issue_details_from_tool}"
-        )
+                    break
+    if not issue_details_from_tool:
+        print(f"❌ Error: Could not get issue details from triage step. Last agent output: {triage_output_summary}")
         return
 
     issue_number = issue_details_from_tool.get("number")
     issue_title = issue_details_from_tool.get("title", "Unknown Title")
     issue_body = issue_details_from_tool.get("body", "No body provided.")
     issue_labels_data = issue_details_from_tool.get("labels", [])
-    issue_labels = [
-        label.get("name") if isinstance(label, dict) else label
-        for label in issue_labels_data
-        if (isinstance(label, dict) and label.get("name")) or isinstance(label, str)
-    ]
+    issue_labels = [label.get("name") if isinstance(label, dict) else label for label in issue_labels_data if (isinstance(label, dict) and label.get("name")) or isinstance(label, str)]
 
     if not issue_number:
         print("❌ Error: Issue number not found in triaged details.")
         return
+    print(f"Triager Output Summary:\n{triage_output_summary}\n")
     print(f"Successfully processed issue #{issue_number}: '{issue_title}'")
 
     # --- Step 1.2: Generating Plan ---
@@ -201,16 +194,15 @@ async def solve_github_issue_flow(
     generated_plan = planner_run.final_output
     print(f"Generated Plan:\n{generated_plan}\n")
 
-
-    # --- Step 1.5: Identify Target File or Use Override ---
-    target_file_path: Optional[str] = None
+    # --- Step 1.5: Identify Target Files or Use Override ---
+    identified_file_paths: List[str] = []
     if target_file_override:
-        target_file_path = target_file_override
-        print(f"\n✅ User-specified target file: {target_file_path}. Skipping file identification step.\n")
+        identified_file_paths = [f.strip() for f in target_file_override.split(',') if f.strip()]
+        print(f"\n✅ User-specified target file(s): {', '.join(identified_file_paths)}. Skipping file identification step.\n")
     else:
-        print(f"\n📑 Step 1.5: Identifying Target File for issue #{issue_number}...")
+        print(f"\n📑 Step 1.5: Identifying Target Files for issue #{issue_number}...")
         identifier_input = (
-            f"Based on the following GitHub issue, identify the single file that needs to be modified.\n"
+            f"Based on the following GitHub issue, identify the file(s) that need to be modified, created, or are relevant to a rename/delete operation.\n"
             f"Repository: {repo_owner}/{repo_name}\n"
             f"Default Branch: {default_branch_name}\n"
             f"Issue Title: {issue_title}\n"
@@ -219,291 +211,228 @@ async def solve_github_issue_flow(
             f"Overall Plan: {generated_plan}\n"
         )
         identifier_run = await runner.run(file_identifier, input=identifier_input)
-        target_file_path = identifier_run.final_output.strip()
-        print(f"File Identifier Agent identified target file: {target_file_path}\n")
+        file_output = identifier_run.final_output.strip()
+        if file_output.lower() != 'none':
+            identified_file_paths = [path.strip() for path in file_output.split('\n') if path.strip()]
+        print(f"File Identifier Agent identified target file(s): {', '.join(identified_file_paths) if identified_file_paths else 'None'}\n")
 
-    if not target_file_path:
-        print(f"❌ Error: Could not determine a valid target file. Path was: '{target_file_path}'")
-        return
+    if not identified_file_paths:
+        print(f"ℹ️ No target files identified or specified by user. Assuming issue does not require code changes or cannot be addressed by file modification.")
 
-    # --- Step 2: Propose Initial Code Solution ---
-    print(f"\n💡 Step 2: Proposing Initial Code Solution for issue #{issue_number}...")
-    proposer_input = (
-        f"Based on the following GitHub issue, and the overall plan, please propose a code solution.\n"
-        f"Overall Plan:\n{generated_plan}\n\n"
-        f"Issue Title: {issue_title}\n"
-        f"Issue Body:\n{issue_body}\n\n"
-        f"Labels: {', '.join(issue_labels)}\n"
-        f"The code should be for the file path: '{target_file_path}'. "
-        "Infer the programming language from the issue context or file path. "
-        "Format your response with the code solution in a single markdown code block."
-    )
-    proposer_run = await runner.run(code_proposer, input=proposer_input)
-    proposed_solution_markdown = proposer_run.final_output
-    current_proposed_code = extract_code_from_markdown(proposed_solution_markdown)
-    print(f"Code Proposer Output (Markdown):\n{proposed_solution_markdown}")
-    if current_proposed_code:
-        print(f"Extracted Code Solution:\n{current_proposed_code}\n")
-    else:
-        print(
-            "⚠️ Code Proposer did not provide a usable code block. Cannot proceed with review or commit.\n"
+    # --- Step 2: Propose Initial File Operations ---
+    current_proposed_operations: List[Dict[str, str]] = []
+    if identified_file_paths:
+        print(f"\n💡 Step 2: Proposing Initial File Operations for issue #{issue_number} for files: {', '.join(identified_file_paths)}...")
+        proposer_input = (
+            f"Based on the following GitHub issue, overall plan, and list of target files, "
+            f"please propose all necessary file operations (creations, modifications, deletions for renames).\n"
+            f"Overall Plan:\n{generated_plan}\n\n"
+            f"Issue Title: {issue_title}\n"
+            f"Issue Body:\n{issue_body}\n\n"
+            f"Labels: {', '.join(issue_labels)}\n"
+            f"Relevant File Paths Identified: {', '.join(identified_file_paths)}\n"
+            "For each operation:\n"
+            "- If creating or modifying a file: State 'Changes for `path/to/file.ext`:' followed by the code in a markdown block.\n"
+            "- If deleting a file: State 'Delete file: `path/to/file.ext`'.\n"
+            "- If a file from the identified list needs no changes: State 'No changes needed for `path/to/file.ext`.'."
+            "If the issue is vague (e.g., 'add a math function'), make a reasonable choice for a simple implementation "
+            "(e.g., an `exponentiation` function if `calculator.py` is targeted, or a simple `return \"Good morning!\"` "
+            "if `greeter.py` is targeted). Clearly state any assumptions made."
         )
-        current_proposed_code = None
+        proposer_run = await runner.run(code_proposer, input=proposer_input)
+        proposed_solution_markdown = proposer_run.final_output
+        
+        print(f"DEBUG: Code Proposer Raw Output:\n---\n{proposed_solution_markdown}\n---\n")
+
+        current_proposed_operations = parse_file_operations(proposed_solution_markdown)
+        print(f"Code Proposer Output (Parsed Operations):")
+        if current_proposed_operations:
+            for op in current_proposed_operations:
+                print(f"  File: {op['file_path']}, Action: {op.get('action')}")
+                if op.get('action') == 'modify':
+                    print(f"    Code (first 100 chars):\n{op['code'][:100]}...\n")
+        else:
+             print("⚠️ Code Proposer did not provide usable changes (output was empty or not parsable).\n")
+    else:
+        print("⚠️ No files identified for proposal. Skipping code proposal and review steps.\n")
 
     # --- Step 2.5: Review and Revision Loop ---
     max_review_cycles = max_review_cycles_override
-    tech_feedback = "No feedback yet."
-    style_feedback = "No feedback yet."
-    solution_satisfactory = False
-    final_code_to_commit = current_proposed_code
-
-    if current_proposed_code:
+    final_operations_to_commit: List[Dict[str, str]] = []
+    tech_feedback = "N/A (No operations to review)" 
+    style_feedback = "N/A (No operations to review)"
+    
+    if current_proposed_operations and any(p.get('action') == 'modify' or p.get('action') == 'delete' for p in current_proposed_operations) :
+        temp_proposed_operations = current_proposed_operations
         for cycle in range(max_review_cycles):
             print(f"\n🔄 Review Cycle {cycle + 1}/{max_review_cycles} 🔄")
+            
+            review_input_parts = [
+                f"Issue Title: {issue_title}\nIssue Number: {issue_number}\nIssue Body:\n{issue_body}\n",
+                f"Labels: {', '.join(issue_labels)}\n",
+                f"Overall Plan:\n{generated_plan}\n\nProposed File Operations:"
+            ]
+            has_operations_to_review = False
+            for op in temp_proposed_operations:
+                if op.get('action') == 'modify':
+                    review_input_parts.append(f"\n--- Modify/Create File: `{op['file_path']}` ---\n```\n{op['code']}\n```")
+                    has_operations_to_review = True
+                elif op.get('action') == 'delete':
+                    review_input_parts.append(f"\n--- Delete File: `{op['file_path']}` ---")
+                    has_operations_to_review = True
+                else: 
+                    review_input_parts.append(f"\n--- File: `{op['file_path']}` ---\nNo changes proposed.")
+            
+            if not has_operations_to_review:
+                print("ℹ️ No actual modifications or deletions proposed for review in this cycle.")
+                final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
+                break
 
-            review_task_input = (
-                f"Issue Title: {issue_title}\nIssue Number: {issue_number}\nIssue Body:\n{issue_body}\n\n"
-                f"Labels: {', '.join(issue_labels)}\n\n"
-                f"Overall Plan:\n{generated_plan}\n\n"
-                f"Proposed Solution Code (for file '{target_file_path}'):\n{final_code_to_commit}\n"
-            )
+            review_task_input = "\n".join(review_input_parts)
 
             print("🕵️‍♂️ Requesting Technical Review...")
-            technical_review_run = await runner.run(
-                technical_reviewer, input=review_task_input
-            )
+            technical_review_run = await runner.run(technical_reviewer, input=review_task_input)
             tech_feedback = technical_review_run.final_output
             print(f"Technical Reviewer Output:\n{tech_feedback}\n")
 
             print("🎨 Requesting Style Review...")
-            style_review_run = await runner.run(
-                style_reviewer, input=review_task_input
-            )
+            style_review_run = await runner.run(style_reviewer, input=review_task_input)
             style_feedback = style_review_run.final_output
             print(f"Style Reviewer Output:\n{style_feedback}\n")
 
-            tech_ok = any(
-                s in tech_feedback.lower()
-                for s in ["lgtm", "satisfactory", "looks good", "approved"]
-            )
-            style_ok = any(
-                s in style_feedback.lower()
-                for s in ["lgtm", "satisfactory", "looks good", "approved"]
-            )
+            tech_ok = any(s in tech_feedback.lower() for s in ["lgtm", "satisfactory", "approved"])
+            style_ok = any(s in style_feedback.lower() for s in ["lgtm", "satisfactory", "approved"])
 
             if tech_ok and style_ok:
-                print("✅ Both reviewers are satisfied. Proceeding with the current solution.")
-                solution_satisfactory = True
+                print("✅ Both reviewers are satisfied. Proceeding with the current operations.")
+                final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
                 break
-
+            
             if cycle < max_review_cycles - 1:
                 print("⚠️ Revision needed. Requesting CodeProposer to revise...")
-                revision_proposer_input = (
-                    f"The following code was proposed for GitHub issue #{issue_number} ('{issue_title}') to be placed in file '{target_file_path}':\n"
-                    f"```\n{final_code_to_commit}\n```\n\n"
-                    f"It received the following feedback:\n"
-                    f"Technical Review: {tech_feedback}\n"
-                    f"Style Review: {style_feedback}\n\n"
-                    f"Remember the overall plan:\n{generated_plan}\n\n"
-                    "Please provide a revised code solution addressing this feedback for the same target file. "
-                    "Output only the new code block."
-                )
-                proposer_run = await runner.run(
-                    code_proposer, input=revision_proposer_input
-                )
-                revised_solution_markdown = proposer_run.final_output
-                revised_code = extract_code_from_markdown(revised_solution_markdown)
-                print(
-                    f"Code Proposer Output (Revised Markdown):\n{revised_solution_markdown}"
-                )
+                revision_proposer_input_parts = [
+                    f"The following file operations for GitHub issue #{issue_number} ('{issue_title}') received feedback.",
+                    f"Overall Plan:\n{generated_plan}\n",
+                    "Current Proposed Operations:"
+                ]
+                for op in temp_proposed_operations:
+                     if op.get('action') == 'modify':
+                        revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Modify/Create) ---\n```\n{op['code']}\n```")
+                     elif op.get('action') == 'delete':
+                        revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (Delete) ---")
+                     else:
+                         revision_proposer_input_parts.append(f"\n--- File: `{op['file_path']}` (No Changes) ---")
 
-                if revised_code and revised_code != final_code_to_commit:
-                    final_code_to_commit = revised_code
-                    print(
-                        f"Updated Code Solution after revision:\n{final_code_to_commit}\n"
-                    )
-                elif revised_code == final_code_to_commit:
-                    print(
-                        "Code Proposer returned the same code. Assuming no further changes possible based on feedback."
-                    )
-                    solution_satisfactory = tech_ok and style_ok
-                    break
+                revision_proposer_input_parts.append(f"\nFeedback:\nTechnical Review: {tech_feedback}\nStyle Review: {style_feedback}\n")
+                revision_proposer_input_parts.append(
+                    "Please provide a revised set of file operations. "
+                    "For each operation:\n"
+                    "- If creating or modifying a file: State 'Changes for `path/to/file.ext`:' followed by the code.\n"
+                    "- If deleting a file: State 'Delete file: `path/to/file.ext`'.\n"
+                    "- If a file no longer needs changes: State 'No changes needed for `path/to/file.ext`.'."
+                    "If the issue is vague (e.g., 'add a math function'), make a reasonable choice for a simple implementation. Clearly state any assumptions made."
+                )
+                proposer_run = await runner.run(code_proposer, input="\n".join(revision_proposer_input_parts))
+                revised_solution_markdown = proposer_run.final_output
+                print(f"DEBUG: Code Proposer Revised Raw Output:\n---\n{revised_solution_markdown}\n---\n")
+                revised_operations = parse_file_operations(revised_solution_markdown)
+                
+                if revised_operations:
+                    temp_proposed_operations = revised_operations
+                    print(f"Updated File Operations after revision (Parsed):")
+                    for op_rev in temp_proposed_operations: print(f"  File: {op_rev['file_path']}, Action: {op_rev.get('action')}")
                 else:
-                    print(
-                        "⚠️ Code Proposer did not provide a new code block in its revision. Using last valid code."
-                    )
+                    print("⚠️ Code Proposer did not provide a new set of operations in its revision. Using last valid proposals.")
+                    final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
                     break
             else:
-                print(
-                    f"⚠️ Maximum review cycles ({max_review_cycles}) reached. Proceeding with the last proposed solution."
-                )
-                solution_satisfactory = tech_ok and style_ok
+                print(f"⚠️ Maximum review cycles ({max_review_cycles}) reached. Proceeding with the last proposed operations.")
+                final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
+                break
+        
+        if not final_operations_to_commit and temp_proposed_operations and any(p.get('action') != 'no_change' for p in temp_proposed_operations):
+            print("⚠️ Review cycles completed, but solution not fully approved. Committing last valid operations with modifications or deletions.")
+            final_operations_to_commit = [p for p in temp_proposed_operations if p.get('action') != 'no_change']
+
+    elif current_proposed_operations: 
+        print("ℹ️ No actual modifications or deletions were proposed (e.g., all 'no_change'). Skipping review loop.")
+        final_operations_to_commit = []
     else:
-        print(
-            "⚠️ No initial code proposed by CodeProposer. Skipping review and commit steps for code."
-        )
-        final_code_to_commit = None
+        print("⚠️ No file operations proposed. Skipping review and commit steps for code.")
+        final_operations_to_commit = []
 
     # --- Step 3: Creating/Ensuring Branch ---
     print("\n🌿 Step 3: Creating/Ensuring Branch...")
     branch_prefix = "fix"
-    if any("enhancement" in label.lower() for label in issue_labels):
-        branch_prefix = "feature"
-    elif any("chore" in label.lower() for label in issue_labels):
-        branch_prefix = "chore"
-
+    if any("enhancement" in label.lower() for label in issue_labels): branch_prefix = "feature"
+    elif any("chore" in label.lower() for label in issue_labels): branch_prefix = "chore"
     target_branch_name_ideal = f"{branch_prefix}/issue-{issue_number}"
-
-    branch_run = await runner.run(
-        branch_creator,
-        input=f"Ensure branch for {repo_owner}/{repo_name} issue {issue_number}, prefix {branch_prefix}, base {default_branch_name}.",
-    )
+    branch_run = await runner.run(branch_creator, input=f"Ensure branch for {repo_owner}/{repo_name} issue {issue_number}, prefix {branch_prefix}, base {default_branch_name}.")
     branch_agent_summary = branch_run.final_output
-    print(f"Branch Creator Agent Output: {branch_agent_summary}\n")
-
+    
     actual_branch_name_from_tool = target_branch_name_ideal
     branch_op_success = False
-
-    new_items_branch_check = getattr(branch_run, "new_items", None)
+    new_items_branch_check = getattr(branch_run, 'new_items', None)
     if new_items_branch_check:
-        tool_call_item_idx_branch = -1
         for i_br, item_br in enumerate(new_items_branch_check):
-            if type(item_br).__name__ == "ToolCallItem":
-                raw_item_br = getattr(item_br, "raw_item", None)
-                tool_name_br = None
-                if raw_item_br:
-                    tool_name_br = getattr(raw_item_br, "name", None)
-                    if not tool_name_br:
-                        func_br = getattr(raw_item_br, "function", None)
-                        if func_br:
-                            tool_name_br = getattr(func_br, "name", None)
-                if tool_name_br == "create_pr_branch":
-                    tool_call_item_idx_branch = i_br
-                    break
-
-        if tool_call_item_idx_branch != -1 and (
-            tool_call_item_idx_branch + 1
-        ) < len(new_items_branch_check):
-            output_item_branch = new_items_branch_check[
-                tool_call_item_idx_branch + 1
-            ]
-            if type(output_item_branch).__name__ == "ToolCallOutputItem":
-                content_br = getattr(
-                    output_item_branch, "output", getattr(output_item_branch, "content", None)
-                )
-                if content_br is None and hasattr(output_item_branch, "raw_item"):
-                    raw_br_item = output_item_branch.raw_item
-                    if isinstance(raw_br_item, dict):
-                        content_br = raw_br_item
-
+            if type(item_br).__name__ == 'ToolCallOutputItem': 
+                content_br = getattr(item_br, 'output', getattr(item_br, 'content', None))
+                if content_br is None and hasattr(item_br, 'raw_item'):
+                    raw_br_item = item_br.raw_item
+                    if isinstance(raw_br_item, dict): content_br = raw_br_item
+                
                 if isinstance(content_br, dict):
                     if "error" not in content_br:
                         branch_op_success = True
-                        actual_branch_name_from_tool = content_br.get(
-                            "branch_name", target_branch_name_ideal
-                        )
-                        if (
-                            content_br.get("status") == "already_exists"
-                            or content_br.get("already_exists") is True
-                        ):
-                            print(
-                                f"INFO: Branch '{actual_branch_name_from_tool}' already exists."
-                            )
+                        actual_branch_name_from_tool = content_br.get("branch_name", target_branch_name_ideal)
+                        if content_br.get("status") == "already_exists" or content_br.get("already_exists") is True:
+                             print(f"INFO: Branch '{actual_branch_name_from_tool}' already exists.")
                         else:
-                            print(
-                                f"INFO: Branch '{actual_branch_name_from_tool}' creation/check successful."
-                            )
+                             print(f"INFO: Branch '{actual_branch_name_from_tool}' creation/check successful.")
                     else:
-                        print(
-                            f"ERROR: Branch tool reported error: {content_br.get('error')}"
-                        )
-                        branch_agent_summary = content_br.get(
-                            "error", branch_agent_summary
-                        )
-
+                        print(f"ERROR: Branch tool reported error: {content_br.get('error')}")
+                        branch_agent_summary = content_br.get('error', branch_agent_summary) + f" (Tool Output: {content_br})"
+                break 
+    
+    if not branch_op_success:
+        print(f"Branch Creator Agent Output (Summary): {branch_agent_summary}\n")
+        if "error" not in branch_agent_summary.lower() and ("created" in branch_agent_summary.lower() or "exists" in branch_agent_summary.lower() or "successful" in branch_agent_summary.lower()):
+            match_bn = re.search(r"(?:branch|')\s*`?([^'`]+)`?\s*(?:has been successfully created|already exists|creation/check successful)", branch_agent_summary, re.IGNORECASE)
+            if match_bn: actual_branch_name_from_tool = match_bn.group(1)
+            branch_op_success = True
+            print(f"Branch operation likely successful based on summary. Target branch: {actual_branch_name_from_tool}")
+        else:
+             print(f"❌ Branch operation failed or status unclear based on summary.")
+    
     final_target_branch = actual_branch_name_from_tool
 
     # --- Step 4: Committing Code ---
-    commit_status = "Commit skipped: No code available or solution not satisfactory."
-    if final_code_to_commit:
-        if branch_op_success:
-            print(f"\n💾 Step 4: Committing Code to branch '{final_target_branch}'...")
-            commit_message_text = (
-                f"Propose solution for issue #{issue_number}: {issue_title}"
-            )
-            committer_input = (
-                f"Commit the following code to repository {repo_owner}/{repo_name} on branch {final_target_branch}. "
-                f"File path: {target_file_path}. Commit message: '{commit_message_text}'\n\n"
-                f"Code Content:\n{final_code_to_commit}"
-            )
-            committer_run = await runner.run(committer, input=committer_input)
-            commit_status_agent_summary = committer_run.final_output
-            print(f"Code Committer Agent Output:\n{commit_status_agent_summary}\n")
-
-            commit_tool_output_content = None
-            new_items_commit_check = getattr(committer_run, "new_items", None)
-            if new_items_commit_check:
-                commit_tool_call_idx = -1
-                for i_c, item_c in enumerate(new_items_commit_check):
-                    if type(item_c).__name__ == "ToolCallItem":
-                        raw_item_c = getattr(item_c, "raw_item", None)
-                        tool_name_c = None
-                        if raw_item_c:
-                            tool_name_c = getattr(raw_item_c, "name", None)
-                            if not tool_name_c:
-                                func_c = getattr(raw_item_c, "function", None)
-                                if func_c:
-                                    tool_name_c = getattr(func_c, "name", None)
-                        if tool_name_c == "commit_code_to_branch":
-                            commit_tool_call_idx = i_c
-                            break
-                if commit_tool_call_idx != -1 and (commit_tool_call_idx + 1) < len(
-                    new_items_commit_check
-                ):
-                    output_item_commit = new_items_commit_check[
-                        commit_tool_call_idx + 1
-                    ]
-                    if type(output_item_commit).__name__ == "ToolCallOutputItem":
-                        commit_tool_output_content = getattr(
-                            output_item_commit,
-                            "output",
-                            getattr(output_item_commit, "content", None),
-                        )
-                        if commit_tool_output_content is None and hasattr(
-                            output_item_commit, "raw_item"
-                        ):
-                            raw_c_item = output_item_commit.raw_item
-                            if isinstance(raw_c_item, dict):
-                                commit_tool_output_content = raw_c_item
-
-            if (
-                isinstance(commit_tool_output_content, dict)
-                and "error" not in commit_tool_output_content
-            ):
-                commit_status = commit_tool_output_content.get(
-                    "message", "Commit successful (details in tool output)."
-                )
-                print(
-                    f"INFO: Commit to '{target_file_path}' on branch '{final_target_branch}' reported by tool: {commit_status}"
-                )
-                if commit_tool_output_content.get("commit_url"):
-                    commit_status += f" View commit: {commit_tool_output_content.get('commit_url')}"
-            elif (
-                isinstance(commit_tool_output_content, dict)
-                and "error" in commit_tool_output_content
-            ):
-                commit_status = f"Commit failed (tool error): {commit_tool_output_content.get('error')}"
-                print(
-                    f"ERROR: Commit tool reported error: {commit_tool_output_content.get('error')}"
-                )
-            else:
-                commit_status = commit_status_agent_summary
-
-        else:
-            commit_status = f"Commit skipped: Branch '{final_target_branch}' not successfully created or ensured."
-            print(f"⚠️ {commit_status}")
+    commit_status_summary = "Commit skipped: No operations to commit or branch operation failed."
+    if final_operations_to_commit and branch_op_success:
+        print(f"\n💾 Step 4: Applying File Operations to branch '{final_target_branch}'...")
+        commit_message_base = f"Fix issue #{issue_number}: {issue_title}"
+        
+        committer_input_payload = {
+            "repo_owner": repo_owner,
+            "repo_name": repo_name,
+            "branch_name": final_target_branch,
+            "commit_message_base": commit_message_base,
+            "operations": final_operations_to_commit
+        }
+        committer_input_str = (
+            f"Apply the following file operations to repository {repo_owner}/{repo_name} on branch {final_target_branch}. "
+            f"Base commit message: '{commit_message_base}'.\n\n"
+            f"Operations: {json.dumps(committer_input_payload['operations'])}"
+        )
+        committer_run = await runner.run(committer, input=committer_input_str)
+        commit_status_summary = committer_run.final_output
+        print(f"Code Committer Agent Output:\n{commit_status_summary}\n")
+    elif not final_operations_to_commit:
+         commit_status_summary = "Commit skipped: No approved file operations to commit."
+         print(f"⚠️ {commit_status_summary}")
     else:
-        print(f"⚠️ {commit_status}")
+        commit_status_summary = f"Commit skipped due to branch operation failure ({branch_agent_summary})."
+        print(f"⚠️ {commit_status_summary}")
 
 
     # --- Step 5: Posting Summary Comment ---
@@ -515,53 +444,33 @@ async def solve_github_issue_flow(
     summary_comment_parts.append(f"\n**Generated Plan:**\n{generated_plan}")
 
     if target_file_override:
-        summary_comment_parts.append(f"\n**File Identification:**\nUser specified the target file: `{target_file_path}`.")
+        summary_comment_parts.append(f"\n**File Identification:**\nUser specified target file(s): `{', '.join(identified_file_paths)}`.")
+    elif identified_file_paths:
+        summary_comment_parts.append(f"\n**File Identification:**\nAgent identified target file(s): `{', '.join(identified_file_paths)}`.")
     else:
-        summary_comment_parts.append(f"\n**File Identification:**\nAn agent identified `{target_file_path}` as the target file for the fix.")
+        summary_comment_parts.append(f"\n**File Identification:**\nNo specific files were identified for modification.")
 
-    if proposed_solution_markdown:
-        summary_comment_parts.append(
-            f"\n**Initial Code Proposal Attempt:**\n{proposed_solution_markdown}"
-        )
+    if final_operations_to_commit:
+        summary_comment_parts.append(f"\n**Finalized File Operations:**")
+        for op in final_operations_to_commit:
+            if op.get('action') == 'modify':
+                summary_comment_parts.append(f"\n*Modify/Create file `{op['file_path']}`:*\n```\n{op['code']}\n```")
+            elif op.get('action') == 'delete':
+                 summary_comment_parts.append(f"\n*Delete file `{op['file_path']}`*")
+    elif current_proposed_operations and any(p.get('action') != 'no_change' for p in current_proposed_operations):
+         summary_comment_parts.append(f"\n**Code Proposal Attempt:**\nOperations were proposed (see logs for details) but not finalized/approved after review.")
     else:
-        summary_comment_parts.append(
-            "\n**Initial Code Proposal Attempt:** CodeProposer did not provide an initial solution."
-        )
+        summary_comment_parts.append(f"\n**Code Proposal:** No file operations were proposed or committed.")
 
     summary_comment_parts.append(f"\n**Technical Review:**\n{tech_feedback}")
     summary_comment_parts.append(f"\n**Style Review:**\n{style_feedback}")
 
-    if (
-        final_code_to_commit
-        and final_code_to_commit
-        != extract_code_from_markdown(proposed_solution_markdown)
-    ):
-        summary_comment_parts.append(
-            f"\n**Final (Revised) Code Solution (for {target_file_path}):**\n```\n{final_code_to_commit}\n```"
-        )
-    elif final_code_to_commit:
-        summary_comment_parts.append(
-            f"\n**Final Code Solution (for {target_file_path}):**\n```\n{final_code_to_commit}\n```"
-        )
-    else:
-        summary_comment_parts.append(
-            "\n**Final Code Solution:** No code was finalized for commit."
-        )
-
     if branch_op_success:
-        summary_comment_parts.append(
-            f"\n**Branch:** `{final_target_branch}` (Created/Ensured)"
-        )
-        summary_comment_parts.append(
-            f"\n**Code Commit Status to '{target_file_path}':**\n{commit_status}"
-        )
+        summary_comment_parts.append(f"\n**Branch:** `{final_target_branch}` (Created/Ensured)")
+        summary_comment_parts.append(f"\n**Commit Status:**\n{commit_status_summary}")
     else:
-        summary_comment_parts.append(
-            f"\n**Branch Creation Attempt Summary:** {branch_agent_summary}"
-        )
-        summary_comment_parts.append(
-            f"\n**Code Commit Status:** {commit_status}"
-        )
+        summary_comment_parts.append(f"\n**Branch Creation Attempt Summary:** {branch_agent_summary}")
+        summary_comment_parts.append(f"\n**Commit Status:** {commit_status_summary}")
 
     summary_comment_parts.append("\n---\n*This comment was automatically generated by OctoAgent, an experimental AI-powered issue-solving assistant.*")
 
@@ -595,7 +504,7 @@ def main():
         '--target_file',
         '-f',
         default=None,
-        help='(Optional) The target file path to fix. If not provided, an agent will identify it.'
+        help='(Optional) Comma-separated list of target file paths to fix. If not provided, an agent will identify them.'
     )
     parser.add_argument(
         '--max_review_cycles',
@@ -635,3 +544,4 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
 
     main()
+    
