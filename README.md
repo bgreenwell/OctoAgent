@@ -16,6 +16,16 @@ The project is organized into a Python package within the `src` directory for be
 .
 ├── assets/
 │   └── logo.png 
+├── prompts/  <-- New directory
+│   ├── branch_creator_agent.md
+│   ├── change_explainer_agent.md
+│   ├── code_committer_agent.md
+│   ├── code_proposer_agent.md
+│   ├── code_reviewer_agent_template.md
+│   ├── file_identifier_agent.md
+│   ├── issue_triager_agent.md
+│   ├── planner_agent.md
+│   └── comment_poster_agent.md
 └── src/
 │   └── octoagent/
 │       ├── __init__.py         # Makes 'octoagent' a Python package
@@ -29,7 +39,8 @@ The project is organized into a Python package within the `src` directory for be
 └── requirements.txt
 ```
 
-* `agents.py`: Defines the different AI agents, such as `IssueTriagerAgent`, `CodeProposerAgent`, `CodeReviewerAgent`, and `CodeCommitterAgent`.
+* `agents.py`: Defines the different AI agents (e.g., `FileIdentifierAgent`). Their instructions are loaded from the `prompts/` directory.
+* `prompts/`: Contains markdown files with the instructional prompts for each agent.
 * `github_client.py`: A dedicated client for making requests to the GitHub REST API, handling tasks like fetching issues, creating branches, and committing files.
 * `tools.py`: Contains the functions that agents can use (e.g., `download_github_issue`, `commit_code_to_branch`) and helper utilities.
 * `main.py`: The main entry point for the application. It handles command-line argument parsing and orchestrates the agent workflow.
