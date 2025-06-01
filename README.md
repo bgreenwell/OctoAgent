@@ -162,5 +162,5 @@ Current wishlist (in no particular order of priority):
 - [ ] Add agent to create a pull request automatically (maybe make this optional, like `--create_pr` flag)
 - [ ] Configuration file for agent behavior
   * Instead of relying solely on command-line arguments, a configuration file (e.g., `.octoagent.yml`) could be added to the repository. This would allow users to define more complex behaviors, such as specifying different agent models (e.g., GPT-4 vs. GPT-3.5), setting different review standards, or providing persistent instructions for specific repositories.
-  - [x] Cost and token usage tracking
-  - [ ] Refine agent personas and specializations (e.g., R vs. Python expert)
+- [x] Cost and token usage tracking
+- [ ] Refine agent personas and specializations (e.g., R vs. Python expert)
