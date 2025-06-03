@@ -56,16 +56,6 @@ class ReusableAgent(BaseAgent):
         return result.final_output
 
 
-class SpecialistAgent(ReusableAgent):
-    """
-    An example of a specialized agent that inherits from ReusableAgent.
-    """
-    def __init__(self, name: str = "Specialist", expertise: str = "general tasks", **kwargs):
-        # SpecialistAgent dynamically creates its instructions, so no separate file needed unless customized
-        instructions = f"You are a helpful assistant specializing in {expertise}."
-        super().__init__(name=name, instructions=instructions, **kwargs)
-
-
 class IssueTriagerAgent(ReusableAgent):
     """An agent that triages GitHub issues."""
     def __init__(self, **kwargs):
