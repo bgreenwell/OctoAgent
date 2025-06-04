@@ -23,7 +23,8 @@ from .agents import (
     ChangeExplainerAgent
 )
 from .github_client import GitHubClient
-from .tools import extract_code_from_markdown, parse_github_issue_url
+from .tools import parse_github_issue_url
+
 
 def parse_file_operations(markdown_text: Optional[str]) -> List[Dict[str, str]]:
     """
